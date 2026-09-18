@@ -4,7 +4,7 @@ import pytest
 
 from zhenyun_script_platform_mcp.codec import decode_platform_text, encode_platform_text
 from zhenyun_script_platform_mcp.config import Settings
-from zhenyun_script_platform_mcp.exceptions import VersionConflictError, WriteNotAllowedError
+from zhenyun_script_platform_mcp.exceptions import VersionConflictError
 from zhenyun_script_platform_mcp.models import FixtureStatus
 from zhenyun_script_platform_mcp.services.independent import IndependentScriptService
 
@@ -24,8 +24,10 @@ class IndependentClient:
             "_token": "row-token-must-be-preserved",
         }
         self.put_payload = None
+        self.post_calls = 0
 
     def post(self, path, *, json=None, params=None):
+        self.post_calls += 1
         assert path.endswith("/page")
         return {"content": [deepcopy(self.record)], "totalElements": 1}
 
@@ -36,12 +38,8 @@ class IndependentClient:
         return {"success": True}
 
 
-def settings(*, write=True):
-    return Settings(
-        base_url="https://gateway.dev.example.com",
-        allow_write=write,
-        allowed_hosts=("gateway.dev.example.com",),
-    )
+def settings():
+    return Settings(base_url="https://gateway.dev.example.com")
 
 
 def test_independent_get_decodes_source_and_fixture():
@@ -52,6 +50,16 @@ def test_independent_get_decodes_source_and_fixture():
     assert result.saved_test_input == {"body": "{}"}
     assert result.test_input_status == FixtureStatus.AVAILABLE
     assert len(result.source_hash) == 64
+
+
+def test_independent_get_requires_nonempty_tenant():
+    restricted = Settings(base_url="https://gateway.dev.example.com")
+    client = IndependentClient()
+
+    with pytest.raises(ValueError, match="non-empty tenant"):
+        IndependentScriptService(client, restricted).get(tenant_num="", code="AFTER_API")
+
+    assert client.post_calls == 0
 
 
 def test_independent_save_uses_full_latest_record_and_verifies():
@@ -78,14 +86,5 @@ def test_independent_version_conflict_prevents_put():
             code="AFTER_API",
             source="new",
             expected_version=9,
-        )
-    assert client.put_payload is None
-
-
-def test_independent_write_guard_defaults_to_denied():
-    client = IndependentClient()
-    with pytest.raises(WriteNotAllowedError):
-        IndependentScriptService(client, settings(write=False)).save(
-            tenant_num="SRM-DEMO", code="AFTER_API", source="new"
         )
     assert client.put_payload is None

@@ -24,11 +24,11 @@
 ## 2. 分层
 
 ```text
-FastMCP tools (7 stable workflows)
+FastMCP tools (script lifecycle + verified platform resources)
         |
 tools/* thin handlers
         |
-services/{independent,adapter,debug,fixture}
+        services/{independent,adapter,debug,fixture,platform}
         |
 models + codec + sanitizer + exceptions
         |
@@ -141,13 +141,19 @@ GET A (capture original_enabled + version check)
 
 ## 9. Security Boundary
 
-- `SCRIPT_PLATFORM_ALLOW_WRITE` 默认 false。
-- 可用 `SCRIPT_PLATFORM_ALLOWED_HOSTS` 把写能力限定在 DEV 网关。
-- Bearer/Cookie 只来自环境变量，不进入源码、测试 Fixture 或文档。
+- 所有 10 个持久化/动作工具都执行两阶段协议：第一次只产生绑定工具名与完整参数的短效签名
+  计划，不访问写接口；第二次必须携带用户后续明确确认的同一计划。签名过期、复用或参数变化
+  均拒绝。
+- 不再使用全局写开关、Host 白名单或租户白名单；人工确认、封闭资源枚举、乐观锁和回读校验
+  是互相独立的保护层。
+- Authorization/Cookie 只来自权限为 0600 的本地缓存、本机认证配置或本地 `.env` 凭据，不进入
+  源码、测试 Fixture 或文档。有效 Token 持续复用；已知过期才刷新，opaque Token 仅在平台拒绝
+  后登录并重试一次。
 - HTTP 日志不记录源码、业务 Input 或凭据。
 - `authorization`、Token、Cookie、Password 和平台 `_token` 在 MCP 输出边界递归隐藏；完整
   `_token` 仅留在内存中的保存 payload。
 - 不提供裸 `adapter_disable`、`adapter_enable`、`adapter_save_raw` 工具，避免 Agent 组合出不
   完整状态机。
+- 通用资源和表动作均由封闭枚举控制；新增只读资源不会自动扩大写入表集合。
+- 通用更新、删除和表动作强制使用已读取版本，秘密字段不允许经模型上下文写入。
 - 不本地模拟 GraalJS、STD、BIZ 或 `@M`，真实语义只由 DEV Runtime 验证。
-

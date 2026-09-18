@@ -35,6 +35,7 @@ class IndependentScriptService:
         self._settings = settings
 
     def _get_snapshot(self, *, tenant_num: str, code: str) -> IndependentSnapshot:
+        self._settings.assert_tenant(tenant_num)
         payload = self._client.post(
             self.PAGE_ENDPOINT,
             json={
@@ -88,7 +89,6 @@ class IndependentScriptService:
         source: str,
         expected_version: str | int | None = None,
     ) -> dict[str, Any]:
-        self._settings.assert_write_allowed()
         before = self._get_snapshot(tenant_num=tenant_num, code=code)
         actual_version = before.public.object_version_number
         if expected_version is not None and not versions_equal(expected_version, actual_version):

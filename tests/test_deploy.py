@@ -30,6 +30,23 @@ def test_deploy_originally_disabled_stays_disabled(write_settings):
     assert result["final_enabled"] is False
 
 
+def test_deploy_payload_marks_lines_with_editor_status(write_settings):
+    client = FakeAdapterClient(enabled=False)
+    deploy(AdapterService(client, write_settings))
+    assert all(line["_status"] == "update" for line in client.header["adaptorTaskLines"])
+
+
+def test_deploy_force_enables_originally_disabled_adapter(write_settings):
+    client = FakeAdapterClient(enabled=False)
+    result = deploy(AdapterService(client, write_settings), enable=True)
+    assert client.events == ["GET", "SAVE", "GET", "TOGGLE true", "GET"]
+    assert result["saved"] is True
+    assert result["verified"] is True
+    assert result["original_enabled"] is False
+    assert result["final_enabled"] is True
+    assert client.header["enabledFlag"] is True
+
+
 def test_deploy_originally_enabled_has_exact_safe_call_order(write_settings):
     client = FakeAdapterClient(enabled=True)
     result = deploy(AdapterService(client, write_settings))

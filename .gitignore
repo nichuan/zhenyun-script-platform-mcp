@@ -1,5 +1,8 @@
 .env
+.env.*
+!.env.example
 .venv/
+.auth/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -7,4 +10,3 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-

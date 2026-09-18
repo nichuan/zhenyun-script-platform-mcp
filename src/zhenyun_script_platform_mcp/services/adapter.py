@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 from ..codec import decode_platform_text, encode_platform_text, source_hash
 from ..config import Settings
@@ -27,6 +27,10 @@ class AdapterClient(Protocol):
 
     def post(self, path: str, *, json: Any = None, params: dict[str, Any] | None = None) -> Any: ...
 
+    def delete(
+        self, path: str, *, json: Any = None, params: dict[str, Any] | None = None
+    ) -> Any: ...
+
 
 @dataclass(slots=True)
 class AdapterSnapshot:
@@ -39,6 +43,14 @@ class AdapterService:
     ENDPOINT = "/sada/v1/adaptor-task-headers"
     TOGGLE_ENDPOINT = f"{ENDPOINT}/toggle-cache"
     SAVE_ENDPOINT = f"{ENDPOINT}/adaptor-save"
+    _MUTABLE_HEADER_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "description",
+            "inputEntityCode",
+            "trustful",
+            "favorite",
+        }
+    )
 
     def __init__(
         self,
@@ -57,6 +69,7 @@ class AdapterService:
         task_code: str,
         running_service: str,
     ) -> AdapterSnapshot:
+        self._settings.assert_tenant(tenant_num)
         payload = self._client.get(
             self.ENDPOINT,
             params={
@@ -217,6 +230,231 @@ class AdapterService:
         except (ScriptPlatformError, RuntimeError, TypeError, ValueError):
             return False
 
+    @staticmethod
+    def _prepare_header_payload(raw_header: dict[str, Any]) -> dict[str, Any]:
+        payload = deepcopy(raw_header)
+        payload["_status"] = "update"
+        payload["__id"] = payload.get("__id", 1)
+        raw_lines = payload.get("adaptorTaskLines")
+        if raw_lines is None:
+            raw_lines = payload.get("adapterTaskLines")
+        if not isinstance(raw_lines, list):
+            raise AdapterStateError("Adapter payload did not contain its line collection")
+        for index, raw_line in enumerate(raw_lines):
+            if not isinstance(raw_line, dict):
+                raise AdapterStateError("Adapter payload contains a non-object line")
+            raw_line["_status"] = "update" if raw_line.get("id") is not None else "create"
+            raw_line["__id"] = raw_line.get("__id", 100 + index)
+            raw_line["taskCode"] = payload.get("taskCode")
+            raw_line["headerId"] = raw_line.get("headerId", payload.get("id"))
+        return payload
+
+    def create(
+        self,
+        *,
+        tenant_num: str,
+        task_code: str,
+        running_service: str,
+        description: str = "",
+        input_entity_code: str = "ANYTHING",
+    ) -> dict[str, Any]:
+        self._settings.assert_tenant(tenant_num)
+        try:
+            self._get_snapshot(
+                tenant_num=tenant_num,
+                task_code=task_code,
+                running_service=running_service,
+            )
+        except NotFoundError:
+            pass
+        else:
+            raise VersionConflictError(
+                "Adapter already exists; use adapter_update or adapter_deploy"
+            )
+
+        payload = {
+            "taskCode": task_code,
+            "applyTenantNum": tenant_num,
+            "runningService": running_service,
+            "description": description,
+            "scriptVersion": 3,
+            "inputEntityCode": input_entity_code,
+            "trustful": True,
+            "favorite": False,
+            "_status": "create",
+            "__id": 1,
+            "adaptorTaskLines": [
+                {
+                    "priority": 1,
+                    "scriptType": "JS",
+                    "outputEntityCode": input_entity_code,
+                    "_status": "create",
+                    "__id": 100,
+                }
+            ],
+        }
+        self._client.post(self.SAVE_ENDPOINT, json=payload)
+        try:
+            after = self._get_snapshot(
+                tenant_num=tenant_num,
+                task_code=task_code,
+                running_service=running_service,
+            )
+        except Exception as exc:
+            raise SaveVerificationError(
+                "Adapter create completed, but the new header could not be reloaded",
+                details={"created": True, "verified": False, "cause": type(exc).__name__},
+            ) from exc
+        return {
+            "created": True,
+            "verified": True,
+            "id": after.public.id,
+            "header_version": after.public.object_version_number,
+            "line_ids": [line.id for line in after.public.lines],
+            "enabled": after.public.enabled,
+            "note": "Platform event registration may prefill the initial line; reload before editing source",
+        }
+
+    def update(
+        self,
+        *,
+        tenant_num: str,
+        task_code: str,
+        running_service: str,
+        changes: dict[str, Any],
+        expected_header_version: str | int,
+    ) -> dict[str, Any]:
+        self._settings.assert_tenant(tenant_num)
+        if not changes:
+            raise ValueError("changes must not be empty")
+        blocked = sorted(set(changes) - self._MUTABLE_HEADER_FIELDS)
+        if blocked:
+            raise ValueError(
+                "adapter_update only accepts metadata fields: "
+                + ", ".join(sorted(self._MUTABLE_HEADER_FIELDS))
+                + f"; unsupported: {', '.join(blocked)}"
+            )
+        before = self._get_snapshot(
+            tenant_num=tenant_num,
+            task_code=task_code,
+            running_service=running_service,
+        )
+        if not versions_equal(expected_header_version, before.public.object_version_number):
+            raise VersionConflictError(
+                "Adapter changed after it was loaded. Reload before updating metadata.",
+                details={
+                    "expected_header_version": expected_header_version,
+                    "actual_header_version": before.public.object_version_number,
+                },
+            )
+        payload = self._prepare_header_payload(before.raw_header)
+        payload.update(deepcopy(changes))
+        self._client.post(self.SAVE_ENDPOINT, json=payload)
+        after = self._reload(before.public)
+        mismatches = {
+            key: {"requested": value, "actual": after.raw_header.get(key)}
+            for key, value in changes.items()
+            if after.raw_header.get(key) != value
+        }
+        if mismatches:
+            raise SaveVerificationError(
+                "Adapter metadata save returned successfully, but reloaded fields did not match",
+                details={"saved": True, "verified": False, "mismatches": mismatches},
+            )
+        return {
+            "saved": True,
+            "verified": True,
+            "old_header_version": before.public.object_version_number,
+            "new_header_version": after.public.object_version_number,
+            "changed_fields": sorted(changes),
+            "enabled": after.public.enabled,
+        }
+
+    def toggle(
+        self,
+        *,
+        tenant_num: str,
+        task_code: str,
+        running_service: str,
+        enabled: bool,
+        expected_header_version: str | int,
+    ) -> dict[str, Any]:
+        self._settings.assert_tenant(tenant_num)
+        before = self._get_snapshot(
+            tenant_num=tenant_num,
+            task_code=task_code,
+            running_service=running_service,
+        )
+        if not versions_equal(expected_header_version, before.public.object_version_number):
+            raise VersionConflictError(
+                "Adapter changed after it was loaded. Reload before toggling.",
+                details={
+                    "expected_header_version": expected_header_version,
+                    "actual_header_version": before.public.object_version_number,
+                },
+            )
+        if before.public.enabled == enabled:
+            return {
+                "changed": False,
+                "verified": True,
+                "enabled": enabled,
+                "header_version": before.public.object_version_number,
+            }
+        self._toggle(tenant_num=tenant_num, task_code=task_code, enabled=enabled)
+        after = self._reload(before.public)
+        if after.public.enabled != enabled:
+            raise AdapterStateError("Adapter state did not match the requested toggle after reload")
+        return {
+            "changed": True,
+            "verified": True,
+            "old_enabled": before.public.enabled,
+            "enabled": after.public.enabled,
+            "old_header_version": before.public.object_version_number,
+            "new_header_version": after.public.object_version_number,
+        }
+
+    def delete(
+        self,
+        *,
+        tenant_num: str,
+        task_code: str,
+        running_service: str,
+        expected_header_version: str | int,
+    ) -> dict[str, Any]:
+        self._settings.assert_tenant(tenant_num)
+        before = self._get_snapshot(
+            tenant_num=tenant_num,
+            task_code=task_code,
+            running_service=running_service,
+        )
+        if not versions_equal(expected_header_version, before.public.object_version_number):
+            raise VersionConflictError(
+                "Adapter changed after it was loaded. Reload before deleting.",
+                details={
+                    "expected_header_version": expected_header_version,
+                    "actual_header_version": before.public.object_version_number,
+                },
+            )
+        if before.public.enabled:
+            raise AdapterStateError(
+                "Refusing to delete an enabled Adapter; call adapter_toggle(enabled=false) first"
+            )
+        self._client.delete(self.ENDPOINT, json=deepcopy(before.raw_header))
+        try:
+            self._reload(before.public)
+        except NotFoundError:
+            return {
+                "deleted": True,
+                "verified": True,
+                "id": before.public.id,
+                "old_header_version": before.public.object_version_number,
+                "recoverable": False,
+            }
+        raise SaveVerificationError(
+            "Adapter delete returned successfully, but the header still exists",
+            details={"deleted": False, "verified": False},
+        )
+
     def deploy(
         self,
         *,
@@ -227,8 +465,8 @@ class AdapterService:
         line_id: str | int | None = None,
         expected_header_version: str | int | None = None,
         expected_line_version: str | int | None = None,
+        enable: bool = False,
     ) -> dict[str, Any]:
-        self._settings.assert_write_allowed()
         original = self._get_snapshot(
             tenant_num=tenant_num,
             task_code=task_code,
@@ -269,16 +507,17 @@ class AdapterService:
                     raise AdapterStateError("Adapter remained enabled after the disable operation")
 
             target_line = self._select_line(current.public, original_line.id)
-            payload = deepcopy(current.raw_header)
+            payload = self._prepare_header_payload(current.raw_header)
             raw_lines = payload.get(current.line_key)
             if not isinstance(raw_lines, list):
                 raise AdapterStateError("Fresh adapter payload did not contain its line collection")
             replaced = False
             for raw_line in raw_lines:
-                if isinstance(raw_line, dict) and str(raw_line.get("id")) == str(target_line.id):
+                if not isinstance(raw_line, dict):
+                    continue
+                if str(raw_line.get("id")) == str(target_line.id):
                     raw_line["scriptContent"] = encode_platform_text(source)
                     replaced = True
-                    break
             if not replaced:
                 raise AdapterStateError("Target line disappeared before save")
         except (ScriptPlatformError, RuntimeError, TypeError, ValueError) as exc:
@@ -350,7 +589,7 @@ class AdapterService:
             "new_line_version": saved_line.object_version_number,
             "requires_manual_attention": False,
         }
-        if not original_enabled:
+        if not original_enabled and not enable:
             return result
 
         try:

@@ -3,7 +3,11 @@ import json
 import pytest
 
 from zhenyun_script_platform_mcp.codec import decode_platform_text
-from zhenyun_script_platform_mcp.exceptions import InvalidFixtureError, NoValidFixtureError
+from zhenyun_script_platform_mcp.config import Settings
+from zhenyun_script_platform_mcp.exceptions import (
+    InvalidFixtureError,
+    NoValidFixtureError,
+)
 from zhenyun_script_platform_mcp.services.debug import DebugService, parse_debug_response
 
 
@@ -61,3 +65,13 @@ def test_debug_rejects_missing_fixture():
     with pytest.raises(NoValidFixtureError) as error:
         DebugService(DebugClient({})).run(tenant_num="T", source="x", raw_input=None)
     assert error.value.code == "NO_VALID_FIXTURE"
+
+
+def test_debug_requires_nonempty_tenant():
+    client = DebugClient({})
+    restricted = Settings(base_url="https://gateway.dev.example.com")
+
+    with pytest.raises(ValueError, match="non-empty tenant"):
+        DebugService(client, restricted).run(tenant_num="", source="x", raw_input={})
+
+    assert client.call is None

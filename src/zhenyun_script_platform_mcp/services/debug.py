@@ -6,6 +6,7 @@ import json
 from typing import Any, Protocol
 
 from ..codec import encode_platform_text
+from ..config import Settings
 from ..exceptions import DebugExecutionError, InvalidFixtureError, NoValidFixtureError
 from ..models import DebugResult
 from ..sanitizer import sanitize, sanitize_text
@@ -54,8 +55,9 @@ def parse_debug_response(payload: Any) -> DebugResult:
 class DebugService:
     ENDPOINT = "/sada/v1/script-debug/run"
 
-    def __init__(self, client: DebugClient) -> None:
+    def __init__(self, client: DebugClient, settings: Settings | None = None) -> None:
         self._client = client
+        self._settings = settings
 
     @staticmethod
     def _serialize_input(raw_input: Any) -> str:
@@ -82,6 +84,8 @@ class DebugService:
         raw_input: Any,
         script_version: str | int | None = None,
     ) -> DebugResult:
+        if self._settings is not None:
+            self._settings.assert_tenant(tenant_num)
         params: dict[str, Any] = {"debugTenantNum": tenant_num}
         if script_version is not None:
             params["scriptVersion"] = script_version

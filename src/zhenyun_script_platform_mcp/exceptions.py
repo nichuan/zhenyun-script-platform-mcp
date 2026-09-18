@@ -41,6 +41,10 @@ class AuthenticationError(ScriptPlatformError):
     code = "AUTHENTICATION_ERROR"
 
 
+class ConfirmationError(ScriptPlatformError):
+    code = "CONFIRMATION_REQUIRED"
+
+
 class NotFoundError(ScriptPlatformError):
     code = "NOT_FOUND"
 
@@ -71,7 +75,3 @@ class SaveVerificationError(ScriptPlatformError):
 
 class AdapterStateError(ScriptPlatformError):
     code = "ADAPTER_STATE_ERROR"
-
-
-class WriteNotAllowedError(ScriptPlatformError):
-    code = "WRITE_NOT_ALLOWED"
