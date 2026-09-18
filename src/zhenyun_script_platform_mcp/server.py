@@ -109,12 +109,16 @@ def _invoke(action: Callable[[], Any]) -> str:
         )
     except Exception as exc:  # transport boundary: never leak a traceback to the agent
         logging.getLogger(__name__).exception("Unhandled Script Platform tool failure")
+        detail = sanitize_text(str(exc).strip())
+        message = f"Unexpected {type(exc).__name__}"
+        if detail:
+            message = f"{message}: {detail}"
         return _serialize(
             {
                 "ok": False,
                 "error": {
                     "code": "INTERNAL_ERROR",
-                    "message": f"Unexpected {type(exc).__name__}",
+                    "message": message,
                     "retryable": False,
                 },
             }
@@ -156,6 +160,30 @@ def _value_preview(field: str, value: Any) -> Any:
     return value
 
 
+def _creation_warnings(arguments: dict[str, Any]) -> list[str]:
+    record = arguments.get("record")
+    if not isinstance(record, dict):
+        return []
+    quick_type = str(record.get("quickType", "")).strip().lower()
+    related = {
+        "api": "api_publish",
+        "api_pre": "api_publish",
+        "api_post": "api_publish",
+        "api_publish": "api_publish",
+        "consumer": "queue_consumer",
+        "schedule": "scheduler",
+    }.get(quick_type)
+    if not related:
+        return []
+    return [
+        (
+            f"Platform may create or link a related {related} record for "
+            f"quickType={record.get('quickType')!r}; check platform_relations_get "
+            "before deleting the script."
+        )
+    ]
+
+
 def _write_preview(arguments: dict[str, Any]) -> dict[str, Any]:
     preview: dict[str, Any] = {
         "target": {key: arguments[key] for key in _TARGET_FIELDS if key in arguments},
@@ -166,6 +194,9 @@ def _write_preview(arguments: dict[str, Any]) -> dict[str, Any]:
     for field in ("record", "changes", "source", "description", "input_entity_code"):
         if field in arguments:
             preview[field] = _value_preview(field, arguments[field])
+    warnings = _creation_warnings(arguments)
+    if warnings:
+        preview["warnings"] = warnings
     return preview
 
 
@@ -175,10 +206,13 @@ def _invoke_write(
     arguments: dict[str, Any],
     confirmation_token: str | None,
     action: Callable[[], Any],
+    preflight: Callable[[], Any] | None = None,
 ) -> str:
     def guarded() -> Any:
         runtime = get_runtime()
         if not confirmation_token:
+            if preflight is not None:
+                preflight()
             return runtime.confirmation.prepare(
                 tool=tool,
                 arguments=arguments,
@@ -303,14 +337,22 @@ def platform_relations_get(
     code: str,
     tenant: str | None = None,
     scan_size: int = 50,
+    scheduler_tenant_id: str | int | None = None,
 ) -> str:
-    """Boundedly scan verified relation fields that may reference a script/code block."""
+    """Boundedly scan verified relation fields that may reference a script/code block.
+
+    Most resources use tenant as tenantNum. Scheduler uses numeric tenantId; provide
+    scheduler_tenant_id for a tenant-scoped scheduler scan. If only a tenant code is supplied,
+    scheduler is scanned without a tenant filter and the result contains an explicit warning.
+    adapter_event is global and ignores the tenant filter.
+    """
     return _invoke(
         lambda: platform_tools.get_relations(
             get_runtime().platform,
             code=code,
             tenant=tenant,
             scan_size=scan_size,
+            scheduler_tenant_id=scheduler_tenant_id,
         )
     )
 
@@ -341,12 +383,21 @@ def platform_resource_create(
     record: dict[str, Any],
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare creation first; execute only with its later human-confirmed token."""
+    """Prepare creation first; execute only with its later human-confirmed token.
+
+    Independent Script records receive platform text encoding and the tenantId default where
+    applicable; known companion-resource warnings are included in the confirmation preview.
+    """
     arguments = {"resource_type": resource_type, "tenant": tenant, "record": record}
     return _invoke_write(
         tool="platform_resource_create",
         arguments=arguments,
         confirmation_token=confirmation_token,
+        preflight=lambda: get_runtime().platform.validate_create(
+            resource_type=resource_type,
+            tenant=tenant,
+            record=record,
+        ),
         action=lambda: platform_tools.create_resource(
             get_runtime().platform,
             resource_type=resource_type,
@@ -396,7 +447,10 @@ def platform_resource_delete(
     expected_version: str | int,
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare irreversible deletion; execute only after later human confirmation."""
+    """Prepare irreversible deletion; execute only after later human confirmation.
+
+    Independent Script deletion is blocked when the bounded relation scan finds references.
+    """
     arguments = {
         "resource_type": resource_type,
         "tenant": tenant,
@@ -460,6 +514,57 @@ def independent_script_get(tenant_num: str, code: str) -> str:
         lambda: independent_tools.get_script(
             get_runtime().independent, tenant_num=tenant_num, code=code
         )
+    )
+
+
+@mcp.tool(annotations=PLATFORM_WRITE)
+def independent_script_create(
+    tenant_num: str,
+    code: str,
+    quick_type: str,
+    description: str,
+    permission: str,
+    module: str,
+    source: str = "",
+    raw_input: Any | None = None,
+    confirmation_token: str | None = None,
+) -> str:
+    """Prepare creation of an Independent Script; execute only after later confirmation.
+
+    The service applies the platform's text encoding and defaults the source to an empty
+    encoded value. Some quick types create or link a companion resource; inspect
+    platform_relations_get before deleting the script.
+    """
+    record: dict[str, Any] = {
+        "code": code,
+        "quickType": quick_type,
+        "description": description,
+        "permission": permission,
+        "module": module,
+        "content": source,
+    }
+    if raw_input is not None:
+        record["contentInput"] = (
+            raw_input
+            if isinstance(raw_input, str)
+            else json.dumps(raw_input, ensure_ascii=False, separators=(",", ":"))
+        )
+    arguments = {"tenant_num": tenant_num, "record": record}
+    return _invoke_write(
+        tool="independent_script_create",
+        arguments=arguments,
+        confirmation_token=confirmation_token,
+        preflight=lambda: get_runtime().platform.validate_create(
+            resource_type="independent_script",
+            tenant=tenant_num,
+            record=record,
+        ),
+        action=lambda: platform_tools.create_resource(
+            get_runtime().platform,
+            resource_type="independent_script",
+            tenant=tenant_num,
+            record=record,
+        ),
     )
 
 

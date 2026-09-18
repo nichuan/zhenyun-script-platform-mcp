@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
 
+from ..codec import encode_platform_text
 from ..config import Settings
 from ..exceptions import (
     NotFoundError,
@@ -92,11 +95,12 @@ class PlatformResourceService:
                     "read": True,
                     "definition": definition.definition_readable,
                     "write": definition.writable,
+                    "validation_notes": list(definition.validation_notes),
                 }
                 for name, definition in RESOURCES.items()
             ],
             "workflows": {
-                "independent_script": ["get", "debug", "save"],
+                "independent_script": ["create", "get", "debug", "save"],
                 "adapter": ["get", "debug", "deploy", "create", "update", "toggle", "delete"],
                 "generic_resource": [
                     "search",
@@ -146,6 +150,14 @@ class PlatformResourceService:
         self._validate_page(page, actual_size)
         if tenant:
             self._settings.assert_tenant(tenant)
+            if (
+                definition.tenant_field == "tenantId"
+                and resource_type != "adapter_event"
+                and not tenant.isdigit()
+            ):
+                raise ValueError(
+                    f"{resource_type} requires numeric tenantId; received tenant {tenant!r}"
+                )
 
         page_params = {"page": page, "size": actual_size, "asyncCountFlag": "DEFAULT"}
         filters: dict[str, Any] = {}
@@ -162,7 +174,9 @@ class PlatformResourceService:
             body: dict[str, Any] = dict(page_params)
             # adaptor_static_code was verified as a global table whose tenantId is ignored.
             if tenant and resource_type != "adapter_event":
-                body[definition.tenant_param] = tenant
+                body[definition.tenant_param] = (
+                    int(tenant) if definition.tenant_field == "tenantId" else tenant
+                )
             if code:
                 body[definition.code_field] = code
             if text:
@@ -370,6 +384,7 @@ class PlatformResourceService:
             "resource_type": resource_type,
             "platform_id": definition.platform_id,
             "label": definition.label,
+            "validation_notes": list(definition.validation_notes),
             "table": {
                 key: payload.get(key)
                 for key in (
@@ -399,6 +414,7 @@ class PlatformResourceService:
         code: str,
         tenant: str | None = None,
         scan_size: int = 50,
+        scheduler_tenant_id: str | int | None = None,
     ) -> dict[str, Any]:
         relations = {
             "api_publish": ("scriptCode",),
@@ -409,14 +425,49 @@ class PlatformResourceService:
         }
         hits: list[dict[str, Any]] = []
         scans: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        scheduler_tenant = (
+            str(scheduler_tenant_id).strip() if scheduler_tenant_id is not None else None
+        )
+        if scheduler_tenant is not None and not scheduler_tenant.isdigit():
+            raise ValueError("scheduler_tenant_id must be numeric")
         for resource_type, fields in relations.items():
             try:
+                scan_tenant = tenant
+                scan_warning: str | None = None
+                if resource_type == "scheduler":
+                    if scheduler_tenant is not None:
+                        scan_tenant = scheduler_tenant
+                    elif tenant and not tenant.isdigit():
+                        # scheduler uses tenantId while the public relation API normally gets
+                        # tenantNum. Scan globally instead of silently returning zero records;
+                        # deletion remains conservative when any matching reference is found.
+                        scan_tenant = None
+                        scan_warning = (
+                            "scheduler was scanned without a tenant filter because tenant is a "
+                            "tenant code; pass scheduler_tenant_id to verify one numeric tenant"
+                        )
+                    elif tenant == "0":
+                        scan_tenant = None
+                        scan_warning = (
+                            "scheduler tenantId=0 is treated as an unverified scope; a global scan "
+                            "was used, pass the real numeric tenantId with scheduler_tenant_id"
+                        )
                 definition, outcome = self._search_raw(
                     resource_type=resource_type,
-                    tenant=tenant,
+                    tenant=scan_tenant,
                     size=scan_size,
                 )
-                scans.append({"resource_type": resource_type, "scanned": len(outcome.records)})
+                scan = {"resource_type": resource_type, "scanned": len(outcome.records)}
+                if scan_tenant != tenant:
+                    scan["effective_tenant"] = scan_tenant
+                if outcome.warnings:
+                    scan["warnings"] = outcome.warnings
+                    warnings.extend(outcome.warnings)
+                if scan_warning:
+                    scan["warning"] = scan_warning
+                    warnings.append(scan_warning)
+                scans.append(scan)
                 for record in outcome.records:
                     matched = [field for field in fields if str(record.get(field, "")) == code]
                     if matched:
@@ -428,15 +479,24 @@ class PlatformResourceService:
                             }
                         )
             except (ScriptPlatformError, TypeError, ValueError, KeyError) as exc:
+                warning = f"{resource_type} relation scan incomplete: {type(exc).__name__}: {exc}"
+                warnings.append(warning)
                 scans.append(
-                    {"resource_type": resource_type, "scanned": 0, "error": type(exc).__name__}
+                    {
+                        "resource_type": resource_type,
+                        "scanned": 0,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "warning": warning,
+                    }
                 )
         return {
             "code": code,
             "hits": hits,
             "hit_count": len(hits),
+            "warnings": warnings,
             "scan_scope": {
                 "per_resource_size": scan_size,
+                "scheduler_tenant_id": scheduler_tenant,
                 "resources": scans,
                 "complete": False,
                 "note": "A bounded scan miss does not prove that no reference exists",
@@ -493,14 +553,91 @@ class PlatformResourceService:
         )
         return result
 
-    def create(
-        self,
+    @staticmethod
+    def _encode_resource_text_fields(
+        definition: ResourceDefinition,
+        record: dict[str, Any],
         *,
-        resource_type: str,
+        default_content: bool = False,
+    ) -> dict[str, Any]:
+        """Convert public plain-text fields to the platform wire format."""
+        result = deepcopy(record)
+        if definition.platform_id != "marmot_script_library":
+            return result
+
+        if "content" not in result and default_content:
+            result["content"] = encode_platform_text("")
+        elif "content" in result:
+            content = result["content"]
+            if content is None and default_content:
+                content = ""
+            if not isinstance(content, str):
+                raise ValueError("independent_script content must be plain text")
+            result["content"] = encode_platform_text(content)
+
+        if "contentInput" in result and result["contentInput"] is not None:
+            fixture = result["contentInput"]
+            if not isinstance(fixture, str):
+                fixture = json.dumps(fixture, ensure_ascii=False, separators=(",", ":"))
+            result["contentInput"] = encode_platform_text(fixture)
+        return result
+
+    @staticmethod
+    def _creation_warnings(definition: ResourceDefinition, record: dict[str, Any]) -> list[str]:
+        if definition.platform_id != "marmot_script_library":
+            return []
+        quick_type = str(record.get("quickType", "")).strip().lower()
+        related = {
+            "api": "api_publish",
+            "api_pre": "api_publish",
+            "api_post": "api_publish",
+            "api_publish": "api_publish",
+            "consumer": "queue_consumer",
+            "schedule": "scheduler",
+        }.get(quick_type)
+        if not related:
+            return []
+        return [
+            (
+                f"Platform may create or link a related {related} record for "
+                f"quickType={record.get('quickType')!r}; check platform_relations_get "
+                "before deleting the script."
+            )
+        ]
+
+    @staticmethod
+    def _validate_creation_fields(
+        definition: ResourceDefinition, record: dict[str, Any]
+    ) -> None:
+        if definition.platform_id != "marmot_script_library":
+            return
+        missing = [
+            field
+            for field in ("permission", "module")
+            if record.get(field) is None
+            or (isinstance(record.get(field), str) and not record[field].strip())
+        ]
+        if missing:
+            raise ValueError(
+                "independent_script create requires: " + ", ".join(missing)
+            )
+        code = record.get("code")
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Z0-9_]+", code):
+            raise ValueError("independent_script code must contain only A-Z, 0-9, and _")
+        description = record.get("description")
+        if not isinstance(description, str) or not re.match(
+            r"^[A-Za-z][A-Za-z0-9_]*-\d+", description.strip()
+        ):
+            raise ValueError(
+                "independent_script description must start with a demand code such as cdp-00000"
+            )
+
+    def _validate_create_request(
+        self,
+        definition: ResourceDefinition,
         tenant: str,
         record: dict[str, Any],
-    ) -> dict[str, Any]:
-        definition = self._assert_write_resource(resource_type, tenant)
+    ) -> None:
         if "id" in record or "_token" in record:
             raise ValueError("Create record must not contain id or _token")
         secret_fields = sorted(set(record) & set(definition.mask_fields))
@@ -511,25 +648,86 @@ class PlatformResourceService:
         code = record.get(definition.code_field)
         if code in {None, ""}:
             raise ValueError(f"Create record must contain {definition.code_field!r}")
-        payload = self._with_tenant(definition, tenant, record)
+        self._validate_creation_fields(definition, record)
+        self._encode_resource_text_fields(definition, record, default_content=True)
+        self._with_tenant(definition, tenant, record)
+
+    def validate_create(
+        self,
+        *,
+        resource_type: str,
+        tenant: str,
+        record: dict[str, Any],
+    ) -> None:
+        """Validate a create request without contacting or changing the platform."""
+        definition = self._assert_write_resource(resource_type, tenant)
+        self._validate_create_request(definition, tenant, record)
+
+    def _get_created_with_retry(
+        self,
+        *,
+        resource_type: str,
+        tenant: str,
+        code: str,
+    ) -> tuple[ResourceDefinition, dict[str, Any], ResourcePage]:
+        last_error: NotFoundError | None = None
+        for attempt in range(self._settings.create_verify_attempts):
+            try:
+                return self._get_raw(resource_type=resource_type, tenant=tenant, code=code)
+            except NotFoundError as exc:
+                last_error = exc
+                if attempt + 1 < self._settings.create_verify_attempts:
+                    delay = self._settings.create_verify_delay_seconds
+                    if delay > 0:
+                        time.sleep(delay)
+        if last_error is not None:
+            raise last_error
+        raise NotFoundError("Create verification did not run")  # pragma: no cover
+
+    def create(
+        self,
+        *,
+        resource_type: str,
+        tenant: str,
+        record: dict[str, Any],
+    ) -> dict[str, Any]:
+        definition = self._assert_write_resource(resource_type, tenant)
+        self._validate_create_request(definition, tenant, record)
+        code = record[definition.code_field]
+        payload = self._encode_resource_text_fields(
+            definition, record, default_content=True
+        )
+        payload = self._with_tenant(definition, tenant, payload)
+        if definition.tenant_field != "tenantId":
+            payload.setdefault("tenantId", 0)
         payload["updateScenario"] = "new"
         self._client.post(definition.record_path, json=payload)
         try:
-            _, created, _ = self._get_raw(
+            _, created, _ = self._get_created_with_retry(
                 resource_type=resource_type, tenant=tenant, code=str(code)
             )
         except Exception as exc:
             raise SaveVerificationError(
                 "Create completed, but the resource could not be reloaded for verification",
-                details={"created": True, "verified": False, "cause": type(exc).__name__},
+                details={
+                    "created": True,
+                    "verified": False,
+                    "cause": type(exc).__name__,
+                    "cause_message": str(exc),
+                    "verify_attempts": self._settings.create_verify_attempts,
+                },
             ) from exc
-        return {
+        result = {
             "created": True,
             "verified": True,
             "resource_type": resource_type,
             "code": str(code),
             "record": self._public_record(definition, created, truncate=False),
         }
+        warnings = self._creation_warnings(definition, record)
+        if warnings:
+            result["warnings"] = warnings
+        return result
 
     def save(
         self,
@@ -555,13 +753,14 @@ class PlatformResourceService:
                 "Resource changed after it was loaded. Reload before saving.",
                 details={"expected_version": expected_version, "actual_version": actual_version},
             )
-        payload = self._with_tenant(definition, tenant, {**current, **deepcopy(changes)})
+        encoded_changes = self._encode_resource_text_fields(definition, changes)
+        payload = self._with_tenant(definition, tenant, {**current, **encoded_changes})
         payload["updateScenario"] = "update"
         self._client.put(definition.record_path, json=payload)
         _, after, _ = self._get_raw(resource_type=resource_type, tenant=tenant, code=code)
         mismatches = {
             key: {"requested": value, "actual": after.get(key)}
-            for key, value in changes.items()
+            for key, value in encoded_changes.items()
             if after.get(key) != value
         }
         if mismatches:
@@ -588,6 +787,14 @@ class PlatformResourceService:
         expected_version: str | int,
     ) -> dict[str, Any]:
         definition = self._assert_write_resource(resource_type, tenant)
+        if resource_type == "independent_script":
+            relations = self.relations(code=code, tenant=tenant)
+            if relations["hits"]:
+                related_types = sorted({hit["resource_type"] for hit in relations["hits"]})
+                raise ValueError(
+                    f"Independent script {code!r} is referenced by "
+                    f"{', '.join(related_types)}; remove references before deleting"
+                )
         _, current, _ = self._get_raw(resource_type=resource_type, tenant=tenant, code=code)
         actual_version = current.get("objectVersionNumber")
         if not versions_equal(expected_version, actual_version):

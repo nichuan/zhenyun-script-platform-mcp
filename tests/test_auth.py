@@ -128,6 +128,62 @@ def test_expired_token_without_refresh_logs_in_once_then_reuses(tmp_path):
     provider.close()
 
 
+def test_string_expiry_and_refresh_metadata_are_normalized(tmp_path):
+    token_file = tmp_path / "token.json"
+    token_file.write_text(
+        json.dumps(
+            {
+                "access_token": "opaque-token",
+                "obtainedAt": "100",
+                "expires_in": "120",
+                "refresh_token": "refresh-token",
+                "refresh_expires_in": "500",
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(token_file, 0o600)
+    provider = AuthProvider(
+        Settings(base_url="https://gateway.dev.example.com", token_file=token_file),
+        browser_login=lambda **_: pytest.fail("browser login must not run"),
+        now=lambda: 150,
+    )
+
+    metadata = provider.metadata()
+    assert metadata["expiry_known"] is True
+    assert metadata["has_refresh_token"] is True
+    assert metadata["expires_at"] is not None
+    provider.close()
+
+
+def test_browser_login_payload_persists_refresh_token_and_string_expiry(tmp_path):
+    token_file = tmp_path / "token.json"
+    os.chmod(tmp_path, 0o700)
+    provider = AuthProvider(
+        Settings(
+            base_url="https://gateway.dev.example.com",
+            token_file=token_file,
+            sso_username="user",
+            sso_password="password",
+        ),
+        browser_login=lambda **_: {
+            "access_token": "browser-token-with-enough-length",
+            "refresh_token": "browser-refresh-token",
+            "expires_in": "120",
+            "refresh_expires_in": "500",
+        },
+        now=lambda: 100,
+    )
+
+    assert provider.get_bearer_token() == "browser-token-with-enough-length"
+    saved = json.loads(token_file.read_text(encoding="utf-8"))
+    assert saved["refresh_token"] == "browser-refresh-token"
+    assert saved["expires_at"] == 220
+    assert saved["refresh_expires_at"] == 600
+    assert provider.metadata()["has_refresh_token"] is True
+    provider.close()
+
+
 def test_environment_credentials_take_priority_over_files_and_keychain(tmp_path, monkeypatch):
     account_file = tmp_path / "account.json"
     credential_file = tmp_path / "credentials.json"

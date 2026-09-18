@@ -42,6 +42,7 @@ class ResourceDefinition:
     definition_readable: bool = True
     mask_fields: tuple[str, ...] = ()
     truncate_fields: tuple[str, ...] = ()
+    validation_notes: tuple[str, ...] = ()
 
     @property
     def record_path(self) -> str:
@@ -73,6 +74,12 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "tenantNum",
         writable=True,
         truncate_fields=("content", "contentInput"),
+        validation_notes=(
+            "code must contain only uppercase letters, digits, and underscores",
+            "description must start with a demand code such as cdp-00000",
+            "permission and module are required on create",
+            "quickType may create a related api_publish, queue_consumer, or scheduler record",
+        ),
     ),
     "adapter_inventory": ResourceDefinition(
         "query",

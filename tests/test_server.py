@@ -3,11 +3,12 @@ from types import SimpleNamespace
 
 from zhenyun_script_platform_mcp.confirmation import ConfirmationManager
 from zhenyun_script_platform_mcp.exceptions import VersionConflictError
-from zhenyun_script_platform_mcp.server import _invoke, _invoke_write, mcp
+from zhenyun_script_platform_mcp.server import _invoke, _invoke_write, _write_preview, mcp
 
 
 def test_server_exposes_lifecycle_and_verified_platform_tools():
     assert set(mcp._tool_manager._tools) == {
+        "independent_script_create",
         "independent_script_get",
         "independent_script_debug",
         "independent_script_save",
@@ -40,15 +41,20 @@ def test_tool_annotations_distinguish_reads_remote_execution_and_writes():
     assert tools["adapter_debug"].annotations.readOnlyHint is False
     assert tools["adapter_debug"].annotations.destructiveHint is False
     assert tools["adapter_deploy"].annotations.destructiveHint is True
+    assert tools["independent_script_create"].annotations.destructiveHint is True
     assert tools["independent_script_save"].annotations.destructiveHint is True
     assert tools["platform_resource_get"].annotations.readOnlyHint is True
     assert tools["platform_resource_save"].annotations.destructiveHint is True
     assert tools["platform_table_action"].annotations.destructiveHint is True
+    assert {"permission", "module"} <= set(
+        tools["independent_script_create"].parameters["required"]
+    )
 
 
 def test_every_write_tool_requires_the_two_phase_confirmation_parameter():
     tools = mcp._tool_manager._tools
     writes = {
+        "independent_script_create",
         "independent_script_save",
         "adapter_deploy",
         "adapter_create",
@@ -79,6 +85,32 @@ def test_tool_boundary_returns_stable_sanitized_error_without_traceback():
     assert result["error"]["code"] == "VERSION_CONFLICT"
     assert "top-secret" not in result["error"]["message"]
     assert result["error"]["details"]["_token"] == "<REDACTED>"
+
+
+def test_unexpected_error_keeps_a_sanitized_diagnostic():
+    def fail():
+        raise RuntimeError("bad config path")
+
+    result = json.loads(_invoke(fail))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INTERNAL_ERROR"
+    assert result["error"]["message"] == "Unexpected RuntimeError: bad config path"
+
+
+def test_write_preview_warns_about_script_companion_resources():
+    preview = _write_preview(
+        {
+            "resource_type": "independent_script",
+            "record": {"code": "SAMPLE", "quickType": "api"},
+        }
+    )
+    assert preview["warnings"] == [
+        (
+            "Platform may create or link a related api_publish record for quickType='api'; "
+            "check platform_relations_get before deleting the script."
+        )
+    ]
 
 
 def test_returned_partial_failure_is_not_marked_ok():

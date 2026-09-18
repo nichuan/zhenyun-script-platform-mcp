@@ -39,14 +39,34 @@ class AuthMaterial:
 
 
 def _timestamp(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)):
         return float(value)
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value).timestamp()
+        return float(value)
     except ValueError:
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            return None
+
+
+def _duration(value: Any) -> float | None:
+    if isinstance(value, bool):
         return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        try:
+            parsed = float(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _jwt_exp(token: str) -> float | None:
@@ -104,27 +124,28 @@ class AuthProvider:
         value = raw.get("access_token") or raw.get("token")
         if not isinstance(value, str) or not value:
             return None
-        obtained_at = raw.get("obtainedAt") if isinstance(raw.get("obtainedAt"), str) else None
+        obtained_at_value = raw.get("obtainedAt") or raw.get("obtained_at")
+        obtained_at = obtained_at_value if isinstance(obtained_at_value, str) else None
         obtained_ts = _timestamp(obtained_at)
         expires_at = _timestamp(raw.get("expires_at") or raw.get("expiresAt"))
-        if (
-            expires_at is None
-            and obtained_ts is not None
-            and isinstance(raw.get("expires_in"), int)
-        ):
-            expires_at = obtained_ts + int(raw["expires_in"])
+        expires_in = _duration(raw.get("expires_in") or raw.get("expiresIn"))
+        if expires_at is None and obtained_ts is not None and expires_in is not None:
+            expires_at = obtained_ts + expires_in
         if expires_at is None:
             expires_at = _jwt_exp(value)
         refresh_expires_at = _timestamp(
             raw.get("refresh_expires_at") or raw.get("refreshExpiresAt")
         )
+        refresh_expires_in = _duration(
+            raw.get("refresh_expires_in") or raw.get("refreshExpiresIn")
+        )
         if (
             refresh_expires_at is None
             and obtained_ts is not None
-            and isinstance(raw.get("refresh_expires_in"), int)
+            and refresh_expires_in is not None
         ):
-            refresh_expires_at = obtained_ts + int(raw["refresh_expires_in"])
-        refresh_token = raw.get("refresh_token")
+            refresh_expires_at = obtained_ts + refresh_expires_in
+        refresh_token = raw.get("refresh_token") or raw.get("refreshToken")
         return AuthMaterial(
             token=value,
             source=str(path),
@@ -252,10 +273,14 @@ class AuthProvider:
         now = self._now()
         output = dict(payload)
         output["obtainedAt"] = datetime.fromtimestamp(now, UTC).isoformat()
-        if isinstance(output.get("expires_in"), int):
-            output["expires_at"] = now + int(output["expires_in"])
-        if isinstance(output.get("refresh_expires_in"), int):
-            output["refresh_expires_at"] = now + int(output["refresh_expires_in"])
+        expires_in = _duration(output.get("expires_in") or output.get("expiresIn"))
+        if expires_in is not None:
+            output["expires_at"] = now + expires_in
+        refresh_expires_in = _duration(
+            output.get("refresh_expires_in") or output.get("refreshExpiresIn")
+        )
+        if refresh_expires_in is not None:
+            output["refresh_expires_at"] = now + refresh_expires_in
         descriptor, temp_name = tempfile.mkstemp(prefix=".token-", dir=path.parent)
         try:
             os.fchmod(descriptor, 0o600)
@@ -300,6 +325,8 @@ class AuthProvider:
             return None
         if not payload.get("refresh_token"):
             payload["refresh_token"] = material.refresh_token
+        if "refresh_expires_at" not in payload and material.refresh_expires_at is not None:
+            payload["refresh_expires_at"] = material.refresh_expires_at
         return self._write_token(payload)
 
     def _login(self) -> AuthMaterial:

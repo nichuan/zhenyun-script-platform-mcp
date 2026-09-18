@@ -2,6 +2,7 @@ from copy import deepcopy
 
 import pytest
 
+from zhenyun_script_platform_mcp.codec import decode_platform_text, encode_platform_text
 from zhenyun_script_platform_mcp.config import Settings
 from zhenyun_script_platform_mcp.exceptions import VersionConflictError
 from zhenyun_script_platform_mcp.services.platform import PlatformResourceService
@@ -75,6 +76,19 @@ class PlatformClient:
         self.record = None
 
 
+class EventuallyVisibleClient(PlatformClient):
+    def __init__(self, record=None, hidden_page_reads=1):
+        super().__init__(record)
+        self.hidden_page_reads = hidden_page_reads
+
+    def post(self, path, *, params=None, json=None):
+        if path.endswith("/page") and self.hidden_page_reads:
+            self.events.append(("POST", path, deepcopy(params), deepcopy(json)))
+            self.hidden_page_reads -= 1
+            return {"content": [], "totalElements": 0, "totalPages": 0, "number": 0}
+        return super().post(path, params=params, json=json)
+
+
 def settings():
     return Settings(
         base_url="https://gateway.dev.example.com",
@@ -108,6 +122,13 @@ def test_definition_is_locally_parsed_without_mapping_blob():
     assert result["fields"][0]["name"] == "constantCode"
     assert result["fields"][0]["label"] == "常量编码"
     assert result["mapping_json_returned"] is False
+
+
+def test_independent_definition_exposes_known_platform_validation_notes():
+    service = PlatformResourceService(PlatformClient(), settings())
+    result = service.definition(resource_type="independent_script")
+    assert any("uppercase" in note for note in result["validation_notes"])
+    assert any("description" in note for note in result["validation_notes"])
 
 
 def test_definition_rejects_resource_without_definition_contract():
@@ -152,6 +173,128 @@ def test_generic_save_requires_matching_version_and_verifies_fields():
     assert put[3]["updateScenario"] == "update"
 
 
+def test_independent_resource_create_encodes_plain_text_and_defaults_empty_source():
+    client = PlatformClient()
+    service = PlatformResourceService(client, settings())
+
+    service.create(
+        resource_type="independent_script",
+        tenant="SRM-DEMO",
+        record={
+            "code": "NEW_SCRIPT",
+            "description": "cdp-00000 create test",
+            "permission": "PUBLIC",
+            "module": "srm",
+            "content": "return input;",
+            "contentInput": {"body": {}},
+        },
+    )
+    assert decode_platform_text(client.record["content"]) == "return input;"
+    assert decode_platform_text(client.record["contentInput"]) == '{"body":{}}'
+    create_event = next(
+        event for event in client.events if event[0] == "POST" and not event[1].endswith("/page")
+    )
+    assert create_event[3]["tenantId"] == 0
+
+    empty_client = PlatformClient()
+    PlatformResourceService(empty_client, settings()).create(
+        resource_type="independent_script",
+        tenant="SRM-DEMO",
+        record={
+            "code": "EMPTY_SCRIPT",
+            "description": "cdp-00000 empty test",
+            "permission": "PUBLIC",
+            "module": "srm",
+        },
+    )
+    assert decode_platform_text(empty_client.record["content"]) == ""
+
+
+def test_generic_independent_save_encodes_plain_text_changes():
+    client = PlatformClient(
+        {
+            "id": 7,
+            "code": "EDIT_SCRIPT",
+            "tenantNum": "SRM-DEMO",
+            "objectVersionNumber": 1,
+            "content": encode_platform_text("return old;")
+        }
+    )
+    result = PlatformResourceService(client, settings()).save(
+        resource_type="independent_script",
+        tenant="SRM-DEMO",
+        code="EDIT_SCRIPT",
+        changes={"content": "return new;"},
+        expected_version=1,
+    )
+
+    assert result["verified"] is True
+    assert decode_platform_text(client.record["content"]) == "return new;"
+
+
+def test_independent_create_rejects_hidden_platform_constraints_locally():
+    client = PlatformClient()
+    service = PlatformResourceService(client, settings())
+    with pytest.raises(ValueError, match="code must contain"):
+        service.create(
+            resource_type="independent_script",
+            tenant="SRM-DEMO",
+            record={
+                "code": "bad-code",
+                "description": "cdp-00000 invalid",
+                "permission": "PUBLIC",
+                "module": "srm",
+            },
+        )
+    with pytest.raises(ValueError, match="description must start"):
+        service.create(
+            resource_type="independent_script",
+            tenant="SRM-DEMO",
+            record={
+                "code": "VALID_CODE",
+                "description": "not-a-demand-code",
+                "permission": "PUBLIC",
+                "module": "srm",
+            },
+        )
+    assert client.events == []
+
+
+def test_independent_create_rejects_missing_required_permission_or_module():
+    client = PlatformClient()
+    service = PlatformResourceService(client, settings())
+    with pytest.raises(ValueError, match="permission"):
+        service.create(
+            resource_type="independent_script",
+            tenant="SRM-DEMO",
+            record={
+                "code": "VALID_CODE",
+                "description": "cdp-00000 missing permission",
+                "module": "srm",
+            },
+        )
+    assert client.events == []
+
+
+def test_create_verification_retries_short_platform_visibility_delay():
+    client = EventuallyVisibleClient(hidden_page_reads=2)
+    service = PlatformResourceService(
+        client,
+        Settings(
+            base_url="https://gateway.dev.example.com",
+            create_verify_attempts=3,
+            create_verify_delay_seconds=0,
+        ),
+    )
+    result = service.create(
+        resource_type="constant",
+        tenant="SRM-DEMO",
+        record={"constantCode": "EVENTUALLY_VISIBLE", "description": "demo"},
+    )
+    assert result["verified"] is True
+    assert client.hidden_page_reads == 0
+
+
 def test_generic_create_delete_and_table_action_use_verified_wire_shapes():
     client = PlatformClient()
     service = PlatformResourceService(client, settings())
@@ -165,6 +308,7 @@ def test_generic_create_delete_and_table_action_use_verified_wire_shapes():
         event for event in client.events if event[0] == "POST" and not event[1].endswith("/page")
     )
     assert post[3]["updateScenario"] == "new"
+    assert post[3]["tenantId"] == 0
 
     action = service.execute_action(
         resource_type="constant",
@@ -186,6 +330,44 @@ def test_generic_create_delete_and_table_action_use_verified_wire_shapes():
     assert deleted["verified"] is True
     delete_event = next(event for event in client.events if event[0] == "DELETE")
     assert delete_event[3]["updateScenario"] == "delete"
+
+
+def test_scheduler_requires_numeric_tenant_id_before_http_call():
+    client = PlatformClient()
+    service = PlatformResourceService(client, settings())
+    with pytest.raises(ValueError, match="numeric tenantId"):
+        service.search(resource_type="scheduler", tenant="SRM-ZHENYUN")
+    assert client.events == []
+
+
+def test_relations_do_not_silently_skip_scheduler_for_tenant_code():
+    client = PlatformClient(constant_record())
+    result = PlatformResourceService(client, settings()).relations(
+        code="SCRIPT_CODE", tenant="SRM-ZHENYUN"
+    )
+    scheduler_scan = next(
+        scan for scan in result["scan_scope"]["resources"] if scan["resource_type"] == "scheduler"
+    )
+    assert scheduler_scan["effective_tenant"] is None
+    assert scheduler_scan["scanned"] == 1
+    assert result["warnings"]
+
+
+def test_relations_accept_explicit_numeric_scheduler_tenant_id():
+    client = PlatformClient(constant_record())
+    result = PlatformResourceService(client, settings()).relations(
+        code="SCRIPT_CODE", tenant="SRM-ZHENYUN", scheduler_tenant_id=30
+    )
+    scheduler_scan = next(
+        scan for scan in result["scan_scope"]["resources"] if scan["resource_type"] == "scheduler"
+    )
+    assert scheduler_scan["effective_tenant"] == "30"
+    scheduler_request = next(
+        event
+        for event in client.events
+        if event[0] == "POST" and "marmot_scheduler/page" in event[1]
+    )
+    assert scheduler_request[3]["tenantId"] == 30
 
 
 def test_closed_resource_and_action_contracts_reject_unknown_values():

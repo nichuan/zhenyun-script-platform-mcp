@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlencode
 
@@ -53,6 +55,23 @@ class BrowserAuthenticator:
         return None
 
     def login(self, *, username: str, password: str | None) -> dict[str, Any]:
+        """Run the synchronous Playwright flow outside an active asyncio loop.
+
+        AuthProvider is intentionally synchronous because it is also used by the HTTP client.
+        FastMCP may invoke it from an asyncio loop, where Playwright's sync API is forbidden;
+        a dedicated thread gives the sync API its own thread context and event-loop boundary.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return self._login_sync(username=username, password=password)
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="script-platform-sso") as pool:
+            return pool.submit(
+                self._login_sync, username=username, password=password
+            ).result()
+
+    def _login_sync(self, *, username: str, password: str | None) -> dict[str, Any]:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:  # pragma: no cover - packaging failure
@@ -91,6 +110,7 @@ class BrowserAuthenticator:
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 callback: dict[str, str] = {}
+                token_payload: dict[str, Any] = {}
 
                 def capture_callback(request: Any) -> None:
                     url = request.url
@@ -105,6 +125,29 @@ class BrowserAuthenticator:
                         callback["code"] = "received"
 
                 page.on("request", capture_callback)
+
+                def capture_token_response(response: Any) -> None:
+                    if "/protocol/openid-connect/token" not in response.url:
+                        return
+                    try:
+                        payload = response.json()
+                    except (AttributeError, TypeError, ValueError):
+                        return
+                    if not isinstance(payload, dict):
+                        return
+                    for key in (
+                        "access_token",
+                        "refresh_token",
+                        "expires_in",
+                        "refresh_expires_in",
+                        "expires_at",
+                        "refresh_expires_at",
+                        "token_type",
+                    ):
+                        if payload.get(key) not in {None, ""}:
+                            token_payload[key] = payload[key]
+
+                page.on("response", capture_token_response)
                 page.goto(auth_url, wait_until="domcontentloaded", timeout=30_000)
                 page.wait_for_timeout(1_000)
 
@@ -163,10 +206,39 @@ class BrowserAuthenticator:
                         raise AuthenticationError(
                             f"SSO callback rejected the login: {callback['error']}"
                         )
-                    token = page.evaluate(
-                        "() => { try { return String(sessionStorage.getItem('access_token') || ''); "
-                        "} catch (_) { return ''; } }"
+                    stored = page.evaluate(
+                        """() => {
+                            const aliases = {
+                              access_token: ['access_token', 'accessToken'],
+                              refresh_token: ['refresh_token', 'refreshToken'],
+                              expires_in: ['expires_in', 'expiresIn'],
+                              refresh_expires_in: ['refresh_expires_in', 'refreshExpiresIn'],
+                              expires_at: ['expires_at', 'expiresAt'],
+                              refresh_expires_at: ['refresh_expires_at', 'refreshExpiresAt'],
+                              token_type: ['token_type', 'tokenType']
+                            };
+                            const result = {};
+                            for (const storageName of ['sessionStorage', 'localStorage']) {
+                              try {
+                                const storage = window[storageName];
+                                for (const [name, keys] of Object.entries(aliases)) {
+                                  if (result[name]) continue;
+                                  for (const key of keys) {
+                                    const value = storage.getItem(key);
+                                    if (value !== null && value !== '') {
+                                      result[name] = value;
+                                      break;
+                                    }
+                                  }
+                                }
+                              } catch (_) {}
+                            }
+                            return result;
+                        }"""
                     )
+                    if isinstance(stored, dict):
+                        token_payload.update(stored)
+                        token = token_payload.get("access_token", "")
                     if isinstance(token, str) and len(token) > 20:
                         break
                     page.wait_for_timeout(500)
@@ -181,7 +253,19 @@ class BrowserAuthenticator:
                     raise AuthenticationError(message)
 
                 self._validate(token)
-                return {"access_token": token}
+                return {
+                    key: value
+                    for key, value in {
+                        "access_token": token,
+                        "refresh_token": token_payload.get("refresh_token"),
+                        "expires_in": token_payload.get("expires_in"),
+                        "refresh_expires_in": token_payload.get("refresh_expires_in"),
+                        "expires_at": token_payload.get("expires_at"),
+                        "refresh_expires_at": token_payload.get("refresh_expires_at"),
+                        "token_type": token_payload.get("token_type"),
+                    }.items()
+                    if value not in {None, ""}
+                }
             finally:
                 context.close()
 

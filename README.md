@@ -23,10 +23,11 @@ JSON。
 
 ## MCP 工具
 
-脚本生命周期保留 7 个高层工具：
+脚本生命周期保留 8 个高层工具：
 
 | 工具 | 行为 | 是否改变平台状态 |
 | --- | --- | --- |
+| `independent_script_create` | 编码源码/测试 Input 后创建独立脚本，并提示可能的连带资源 | **是** |
 | `independent_script_get` | 精确查询、解码源码及测试 Input | 否 |
 | `independent_script_debug` | 用当前未保存源码调用 DEV Debug Runtime | 否 |
 | `independent_script_save` | 完整记录 PUT、版本检查、回读校验 | **是** |
@@ -76,6 +77,7 @@ uv run --project /ABSOLUTE/PATH/zhenyun-script-platform-mcp \
 | 环境变量 | 必需 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `SCRIPT_PLATFORM_BASE_URL` | 是 | 无 | Script Platform 网关根地址，禁止硬编码 |
+| `SCRIPT_PLATFORM_ENV_DIR` | 否 | 自动发现 `.env` 所在目录 | 配置根目录；建议 MCP 宿主传入绝对路径，所有相对路径都以此目录解析 |
 | `SCRIPT_PLATFORM_TOKEN_FILE` | 否 | `.auth/token.json` | 自动管理的 Token 缓存；原子写入且权限为 0600 |
 | `SCRIPT_PLATFORM_TOKEN_FILES` | 否 | 空 | 可选兼容 Token 文件列表；支持 `token` / `access_token`，文件须为 0600 |
 | `SCRIPT_PLATFORM_SSO_USERNAME` | 否 | 空 | SSO 用户名；与密码一起配置即可跨 macOS 使用 |
@@ -87,7 +89,7 @@ uv run --project /ABSOLUTE/PATH/zhenyun-script-platform-mcp \
 | `SCRIPT_PLATFORM_AUTHORIZE_URL` / `REDIRECT_URI` | 否 | DEV SSO / DEV 业务站 | 浏览器 SSO 参数 |
 | `SCRIPT_PLATFORM_CHROME_PATH` / `CHROME_PROFILE_DIR` | 否 | 系统 Chrome / `.auth/chrome-profile` | 自动登录浏览器与隔离 Profile |
 | `SCRIPT_PLATFORM_TOKEN_REFRESH_SKEW_SECONDS` | 否 | `120` | 已知有效期 Token 的提前刷新窗口 |
-| `SCRIPT_PLATFORM_CONFIRM_TTL_SECONDS` | 否 | `600` | 写入计划确认凭证有效期；凭证只能使用一次 |
+| `SCRIPT_PLATFORM_CONFIRM_TTL_SECONDS` | 否 | `600` | 写入计划确认令牌有效期；令牌只能使用一次 |
 | `SCRIPT_PLATFORM_AUTHORIZATION_SCHEME` | 否 | `bearer` | `bearer` 或 `raw`，适配两种已观察到的网关 Authorization 形态 |
 | `SCRIPT_PLATFORM_COOKIE` | 否 | 空 | 仅在目标环境确实需要时配置 |
 | `SCRIPT_PLATFORM_MENU_ID` | 否 | 空 | 可选 `H-Menu-Id` |
@@ -95,14 +97,22 @@ uv run --project /ABSOLUTE/PATH/zhenyun-script-platform-mcp \
 | `SCRIPT_PLATFORM_VERIFY_SSL` | 否 | `true` | 是否校验证书 |
 | `SCRIPT_PLATFORM_DEFAULT_PAGE_SIZE` / `MAX_PAGE_SIZE` | 否 | `20` / `100` | 通用资源查询分页边界 |
 | `SCRIPT_PLATFORM_TEXT_PREVIEW_CHARS` | 否 | `500` | 列表中日志与长文本预览上限 |
+| `SCRIPT_PLATFORM_CREATE_VERIFY_ATTEMPTS` / `CREATE_VERIFY_DELAY_SECONDS` | 否 | `4` / `0.5` | 创建后回读验证的最大尝试次数与间隔秒数 |
 
-不再使用写开关、Host 白名单或租户白名单。每个写工具固定为两阶段协议：第一次只返回目标、
+不再使用写开关、Host 白名单或租户白名单。每个平台写工具固定为两阶段协议：第一次只返回目标、
 版本、变更摘要、请求摘要和短效签名，不发平台写请求；Agent 必须停止并请用户确认。第二次
-参数必须完全一致且携带签名，签名过期、复用或参数漂移都会被拒绝。
+参数必须完全一致且携带签名，确认令牌默认十分钟有效、只能使用一次，签名过期、复用或参数漂移
+都会被拒绝。
+确认令牌的签名密钥和已使用记录保存在当前 MCP 进程内；MCP 重启后，未执行的计划需要重新生成。
+
+MCP 宿主的当前工作目录不作为配置根目录。若从 IDE、插件缓存或任意目录启动，建议在宿主配置中
+显式传入 `SCRIPT_PLATFORM_ENV_DIR`，避免 Token、凭据和 Chrome Profile 写入错误目录。
 
 Token 文件只保存于本机，不会被插件同步。MCP 会复用未过期 Token；有 refresh token 时优先
 续期；JWT/显式有效期过期时才刷新；无过期信息的 opaque Token 持续复用，只有平台真实返回
-401 或 Token 失效包络后才自动浏览器登录一次并重试。任何工具响应都不会返回 Token 内容。
+401 或 Token 失效包络后才自动刷新或浏览器登录一次并重试。浏览器登录会同时尝试保存
+`access_token`、`refresh_token`、`expires_in` 和 `refresh_expires_in`，以支持后续静默刷新；
+任何工具响应都不会返回 Token 内容。
 
 认证凭据按以下顺序读取：完整的 `SCRIPT_PLATFORM_SSO_USERNAME` +
 `SCRIPT_PLATFORM_SSO_PASSWORD`（通常来自 `.env`）→ 0600 私有凭据文件 → macOS Keychain。
@@ -134,8 +144,18 @@ uv run zhenyun-script-platform-auth status
 - 只有经验证的 10 张 Rel-Table 可走通用 CRUD；`adapter_event` 等只读资源不会因被登记而获得写权限。
 - `platform_resource_save/delete` 和 `platform_table_action` 必须携带最新
   `objectVersionNumber`，版本漂移立即拒绝。
+- `platform_resource_create` 对 `tenantNum` 资源自动补 `tenantId: 0`；`scheduler` 不补该默认值，
+  只接受数字 `tenantId`。
+- `independent_script_create` 以及独立脚本的通用创建都要求调用方提供平台必填的
+  `permission`、`module`，并会在首阶段确认前校验编码/需求描述格式，统一编码
+  `content`/`contentInput`；`platform_definition_get` 会返回已知平台校验提示。
+- 独立脚本的 `quickType` 可能连带创建或引用 `api_publish`、`queue_consumer`、`scheduler`；
+  删除前会扫描引用，创建计划和执行结果也会提示检查关系。
 - 常量 `value` 等秘密字段不会返回，也禁止经通用 create/save 穿过模型上下文。
 - `scheduler` 使用数字 `tenantId`；其它多数资源使用租户编码 `tenantNum`。
+- `platform_relations_get` 的 `tenant` 按多数资源解释为 `tenantNum`；扫描 scheduler 时如需
+  租户级准确结果，应额外传数字 `scheduler_tenant_id`。只传租户编码时工具会做无租户过滤扫描并明确警告，
+  不再把 `scanned: 0` 当作无引用。
 - DELETE 会携带完整记录且成功可能返回 204 空体；HTTP 200 下的 XML/JSON 业务失败也会被识别。
 
 ## Fixture 规则

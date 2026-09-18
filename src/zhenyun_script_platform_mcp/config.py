@@ -7,16 +7,49 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from .exceptions import ConfigurationError
 
-_ENV_DIR = os.getenv("SCRIPT_PLATFORM_ENV_DIR", "").strip()
-_CONFIG_ROOT = Path(_ENV_DIR).expanduser() if _ENV_DIR else Path.cwd()
-if _ENV_DIR:
-    load_dotenv(_CONFIG_ROOT / ".env")
-else:
-    load_dotenv()
+
+def _resolve_config_dir(raw: str, *, base: Path) -> Path:
+    path = Path(raw).expanduser()
+    return (path if path.is_absolute() else base / path).resolve()
+
+
+def _load_environment() -> Path:
+    """Load configuration and anchor relative paths to the loaded .env directory."""
+    explicit_dir = os.getenv("SCRIPT_PLATFORM_ENV_DIR", "").strip()
+    if explicit_dir:
+        root = _resolve_config_dir(explicit_dir, base=Path.cwd())
+        load_dotenv(root / ".env")
+        return root
+
+    dotenv_path = find_dotenv()
+    if not dotenv_path:
+        load_dotenv()
+        configured_dir = os.getenv("SCRIPT_PLATFORM_ENV_DIR", "").strip()
+        return (
+            _resolve_config_dir(configured_dir, base=Path.cwd())
+            if configured_dir
+            else Path.cwd().resolve()
+        )
+
+    dotenv_file = Path(dotenv_path).expanduser().resolve()
+    load_dotenv(dotenv_file)
+    configured_dir = os.getenv("SCRIPT_PLATFORM_ENV_DIR", "").strip()
+    if not configured_dir:
+        return dotenv_file.parent
+
+    # Also support declaring SCRIPT_PLATFORM_ENV_DIR inside the discovered .env.
+    root = _resolve_config_dir(configured_dir, base=dotenv_file.parent)
+    configured_file = root / ".env"
+    if configured_file != dotenv_file:
+        load_dotenv(configured_file, override=True)
+    return root
+
+
+_CONFIG_ROOT = _load_environment()
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -84,6 +117,8 @@ class Settings:
     default_page_size: int = 20
     max_page_size: int = 100
     text_preview_chars: int = 500
+    create_verify_attempts: int = 4
+    create_verify_delay_seconds: float = 0.5
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -122,6 +157,18 @@ class Settings:
         if default_page_size > max_page_size:
             raise ConfigurationError(
                 "SCRIPT_PLATFORM_DEFAULT_PAGE_SIZE must not exceed SCRIPT_PLATFORM_MAX_PAGE_SIZE"
+            )
+        try:
+            create_verify_delay_seconds = float(
+                os.getenv("SCRIPT_PLATFORM_CREATE_VERIFY_DELAY_SECONDS", "0.5")
+            )
+        except ValueError as exc:
+            raise ConfigurationError(
+                "SCRIPT_PLATFORM_CREATE_VERIFY_DELAY_SECONDS must be a number"
+            ) from exc
+        if create_verify_delay_seconds < 0:
+            raise ConfigurationError(
+                "SCRIPT_PLATFORM_CREATE_VERIFY_DELAY_SECONDS must not be negative"
             )
         chrome_path = _configured_path(
             "SCRIPT_PLATFORM_CHROME_PATH",
@@ -175,6 +222,8 @@ class Settings:
             default_page_size=default_page_size,
             max_page_size=max_page_size,
             text_preview_chars=_positive_int("SCRIPT_PLATFORM_TEXT_PREVIEW_CHARS", 500),
+            create_verify_attempts=_positive_int("SCRIPT_PLATFORM_CREATE_VERIFY_ATTEMPTS", 4),
+            create_verify_delay_seconds=create_verify_delay_seconds,
         )
 
     @property

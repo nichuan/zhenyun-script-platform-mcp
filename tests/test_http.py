@@ -144,6 +144,30 @@ def test_http_200_json_and_xml_business_failures_are_rejected():
         json_client.get("/action")
     json_client.close()
 
+
+def test_business_error_preserves_sanitized_platform_response():
+    client = ScriptPlatformClient(
+        Settings(base_url="https://gateway.dev.example.com", bearer_token="test-token"),
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json={
+                    "success": False,
+                    "message": "数据校验失败",
+                    "fieldErrors": {"description": "invalid format"},
+                    "password": "must-not-leak",
+                },
+            )
+        ),
+    )
+    with pytest.raises(ScriptPlatformError) as caught:
+        client.get("/action")
+    assert caught.value.details["platform_response"]["fieldErrors"] == {
+        "description": "invalid format"
+    }
+    assert caught.value.details["platform_response"]["password"] == "<REDACTED>"
+    client.close()
+
     xml_client = ScriptPlatformClient(
         Settings(base_url="https://gateway.dev.example.com"),
         auth_provider=FakeAuth(),

@@ -16,6 +16,7 @@ from ..exceptions import (
     ScriptPlatformError,
     VersionConflictError,
 )
+from ..sanitizer import sanitize
 from .auth import AuthProvider
 
 
@@ -215,7 +216,11 @@ class ScriptPlatformClient:
             or payload.get("error")
             or "Script Platform business operation failed"
         )
+        details = {
+            "request_id": request_id,
+            "platform_response": sanitize(payload),
+        }
         lowered = message.lower()
         if "version" in lowered or "optimistic" in lowered or "lock" in lowered:
-            raise VersionConflictError(message, details={"request_id": request_id})
-        raise ScriptPlatformError(message, details={"request_id": request_id})
+            raise VersionConflictError(message, details=details)
+        raise ScriptPlatformError(message, details=details)
