@@ -244,7 +244,7 @@ PLATFORM_WRITE = ToolAnnotations(
 
 @mcp.tool(annotations=READ_ONLY)
 def platform_context_get(validate_remote: bool = False) -> str:
-    """Return safe environment/auth metadata; optionally validate credentials against DEV."""
+    """读取脱敏的平台环境与认证元数据；可选验证 DEV 连接，返回 ok 或 error.retryable。"""
 
     def action() -> dict[str, Any]:
         runtime = get_runtime()
@@ -271,7 +271,7 @@ def platform_context_get(validate_remote: bool = False) -> str:
     )
 )
 def platform_capabilities_list() -> str:
-    """List implemented workflows, closed resource types, write coverage, and known blocks."""
+    """列出已实现的平台资源、写入覆盖和能力边界；只读，返回 ok 或 error.retryable。"""
     return _invoke(lambda: get_runtime().platform.capabilities())
 
 
@@ -286,12 +286,7 @@ def platform_resource_search(
     page: int = 0,
     size: int | None = None,
 ) -> str:
-    """Search a verified platform resource using a closed resource enum.
-
-    Supports adapters, independent scripts, consumers, API publish/rewrite, import config,
-    schedulers, constants, outbound rules, CodeBlock, QueryBlock, script logs, and adapter events.
-    Long text is bounded in list results and secret constant values are always redacted.
-    """
+    """按封闭 resource_type 检索已验证的平台资源；列表文本有界且秘密常量脱敏，返回 ok 或 error.retryable。"""
     return _invoke(
         lambda: platform_tools.search_resources(
             get_runtime().platform,
@@ -313,7 +308,7 @@ def platform_resource_get(
     code: str,
     tenant: str | None = None,
 ) -> str:
-    """Read one exact current resource; rejects missing or ambiguous matches."""
+    """按 resource_type、code 和可选租户精确读取当前资源；拒绝缺失或歧义结果，返回 ok 或 error.retryable。"""
     return _invoke(
         lambda: platform_tools.get_resource(
             get_runtime().platform,
@@ -326,7 +321,7 @@ def platform_resource_get(
 
 @mcp.tool(annotations=READ_ONLY)
 def platform_definition_get(resource_type: ResourceType) -> str:
-    """Read available field/action metadata without returning the large mappingJson blob."""
+    """读取 resource_type 的字段与动作定义，不返回大段 mappingJson；只读，返回 ok 或 error.retryable。"""
     return _invoke(
         lambda: platform_tools.get_definition(get_runtime().platform, resource_type=resource_type)
     )
@@ -339,13 +334,7 @@ def platform_relations_get(
     scan_size: int = 50,
     scheduler_tenant_id: str | int | None = None,
 ) -> str:
-    """Boundedly scan verified relation fields that may reference a script/code block.
-
-    Most resources use tenant as tenantNum. Scheduler uses numeric tenantId; provide
-    scheduler_tenant_id for a tenant-scoped scheduler scan. If only a tenant code is supplied,
-    scheduler is scanned without a tenant filter and the result contains an explicit warning.
-    adapter_event is global and ignores the tenant filter.
-    """
+    """有界扫描脚本或 CodeBlock 关联；scheduler 需数字 tenantId，adapter_event 为全局，返回 ok 或 error.retryable。"""
     return _invoke(
         lambda: platform_tools.get_relations(
             get_runtime().platform,
@@ -364,7 +353,7 @@ def platform_api_point_list(
     page: int = 0,
     size: int | None = None,
 ) -> str:
-    """List verified API rewrite mount points; mounting itself uses api_rewrite CRUD."""
+    """列出已验证的 API 改写挂载点；挂载使用 api_rewrite CRUD，返回 ok 或 error.retryable。"""
     return _invoke(
         lambda: platform_tools.list_api_points(
             get_runtime().platform,
@@ -383,11 +372,7 @@ def platform_resource_create(
     record: dict[str, Any],
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare creation first; execute only with its later human-confirmed token.
-
-    Independent Script records receive platform text encoding and the tenantId default where
-    applicable; known companion-resource warnings are included in the confirmation preview.
-    """
+    """生成 resource_type 创建计划；仅后续人工确认并携带一次性 confirmation_token 才执行，返回 ok 或 error.retryable。"""
     arguments = {"resource_type": resource_type, "tenant": tenant, "record": record}
     return _invoke_write(
         tool="platform_resource_create",
@@ -416,7 +401,7 @@ def platform_resource_save(
     expected_version: str | int,
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare a version-guarded patch; execute only after later human confirmation."""
+    """生成带 expected_version 的版本保护更新计划；仅后续人工确认并携带一次性 confirmation_token 才执行。"""
     arguments = {
         "resource_type": resource_type,
         "tenant": tenant,
@@ -447,10 +432,7 @@ def platform_resource_delete(
     expected_version: str | int,
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare irreversible deletion; execute only after later human confirmation.
-
-    Independent Script deletion is blocked when the bounded relation scan finds references.
-    """
+    """生成不可逆删除计划；必须携带 expected_version，并经后续人工确认和一次性 confirmation_token 才执行。"""
     arguments = {
         "resource_type": resource_type,
         "tenant": tenant,
@@ -480,7 +462,7 @@ def platform_table_action(
     expected_version: str | int,
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare a registered side-effecting action; execute only after later confirmation."""
+    """生成已登记的平台副作用动作计划；必须携带 expected_version，并经后续人工确认和一次性 confirmation_token 才执行。"""
     arguments = {
         "resource_type": resource_type,
         "tenant": tenant,
@@ -505,11 +487,7 @@ def platform_table_action(
 
 @mcp.tool(annotations=READ_ONLY)
 def independent_script_get(tenant_num: str, code: str) -> str:
-    """Authoritatively read the current Independent Script, version, hash, and fixture.
-
-    Use this after any discovery search and before editing, debugging, or saving. This is
-    read-only and supersedes legacy Pangu database source readers for the current platform state.
-    """
+    """权威读取 Independent Script 当前源码、版本、哈希和 Fixture；只读，返回 ok 或 error.retryable。"""
     return _invoke(
         lambda: independent_tools.get_script(
             get_runtime().independent, tenant_num=tenant_num, code=code
@@ -529,12 +507,7 @@ def independent_script_create(
     raw_input: Any | None = None,
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare creation of an Independent Script; execute only after later confirmation.
-
-    The service applies the platform's text encoding and defaults the source to an empty
-    encoded value. Some quick types create or link a companion resource; inspect
-    platform_relations_get before deleting the script.
-    """
+    """生成 Independent Script 创建计划；仅后续人工确认并携带一次性 confirmation_token 才执行，平台负责编码。"""
     record: dict[str, Any] = {
         "code": code,
         "quickType": quick_type,
@@ -570,7 +543,7 @@ def independent_script_create(
 
 @mcp.tool(annotations=REMOTE_EXECUTION)
 def independent_script_debug(tenant_num: str, source: str, raw_input: Any) -> str:
-    """Execute unsaved Independent Script source in DEV. Does not persist any change."""
+    """在 DEV 执行未保存的 Independent Script 源码；不持久化任何变更，返回 ok 或 error.retryable。"""
     return _invoke(
         lambda: independent_tools.debug_script(
             get_runtime().debug,
@@ -589,7 +562,7 @@ def independent_script_save(
     expected_version: str | int,
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare a version-guarded script save; execute only after later confirmation."""
+    """生成带 expected_version 的 Independent Script 保存计划；仅后续人工确认并携带一次性 confirmation_token 才执行。"""
     arguments = {
         "tenant_num": tenant_num,
         "code": code,
@@ -612,11 +585,7 @@ def independent_script_save(
 
 @mcp.tool(annotations=READ_ONLY)
 def adapter_get(tenant_num: str, task_code: str, running_service: str) -> str:
-    """Authoritatively read the current Adapter header, state, versions, and every decoded line.
-
-    Use this after any discovery search and before editing, debugging, or deploying. This is
-    read-only and supersedes legacy Pangu database source readers for the current platform state.
-    """
+    """权威读取 Adapter Header、状态、版本和解码后的 Lines；只读，返回 ok 或 error.retryable。"""
     return _invoke(
         lambda: adapter_tools.get_adapter(
             get_runtime().adapter,
@@ -636,11 +605,7 @@ def adapter_create(
     input_entity_code: str = "ANYTHING",
     confirmation_token: str | None = None,
 ) -> str:
-    """Create a disabled Adapter header with its required initial line.
-
-    The task code must already exist in the platform event registry. Reload the created Adapter
-    before editing source because the platform may prefill the first line from that registry.
-    """
+    """生成禁用 Adapter 创建计划；task_code 必须已在事件注册表存在，需后续人工确认和一次性 confirmation_token 执行。"""
     arguments = {
         "tenant_num": tenant_num,
         "task_code": task_code,
@@ -672,7 +637,7 @@ def adapter_update(
     expected_header_version: str | int,
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare a version-guarded header update; execute only after later confirmation."""
+    """生成带 expected_header_version 的 Adapter Header 更新计划；仅后续人工确认并携带一次性 confirmation_token 才执行。"""
     arguments = {
         "tenant_num": tenant_num,
         "task_code": task_code,
@@ -704,7 +669,7 @@ def adapter_toggle(
     expected_header_version: str | int,
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare an enable/disable change; execute only after later human confirmation."""
+    """生成启用或禁用 Adapter 计划；必须携带 expected_header_version，并经后续人工确认和一次性 confirmation_token 才执行。"""
     arguments = {
         "tenant_num": tenant_num,
         "task_code": task_code,
@@ -735,7 +700,7 @@ def adapter_delete(
     expected_header_version: str | int,
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare irreversible Adapter deletion; execute only after later confirmation."""
+    """生成 Adapter 删除计划；必须携带 expected_header_version，并经后续人工确认和一次性 confirmation_token 才执行。"""
     arguments = {
         "tenant_num": tenant_num,
         "task_code": task_code,
@@ -765,7 +730,7 @@ def adapter_debug(
     raw_input: Any,
     line_id: str | int | None = None,
 ) -> str:
-    """Execute unsaved Adapter source in DEV; never disables, saves, or enables an Adapter."""
+    """在 DEV 执行未保存的 Adapter 源码；不会停用、保存或启用 Adapter，返回 ok 或 error.retryable。"""
     return _invoke(
         lambda: adapter_tools.debug_adapter(
             get_runtime().adapter,
@@ -789,7 +754,7 @@ def adapter_extract_input(
     marker: str | None = None,
     task_code: str | None = None,
 ) -> str:
-    """Extract balanced JSON from supplied log text. This tool never queries a log system."""
+    """从调用方提供的日志文本提取平衡 JSON；不查询日志系统，返回 ok 或 error.retryable。"""
     return _invoke(
         lambda: fixture_tools.extract_input(log_text=log_text, marker=marker, task_code=task_code)
     )
@@ -807,13 +772,7 @@ def adapter_deploy(
     enable: bool = False,
     confirmation_token: str | None = None,
 ) -> str:
-    """Prepare a tested Adapter deployment; execute only after later human confirmation.
-
-    This is state-changing. It may temporarily disable an enabled Adapter, reload its latest
-    full payload, save and verify one line, and then restore the original enabled state.
-    Set enable=true only when the user asks for the Adapter to end up enabled: after a
-    verified save the Adapter is enabled even if it was disabled before.
-    """
+    """生成带 Header/Line 版本保护的 Adapter 部署计划；仅后续人工确认并携带一次性 confirmation_token 才执行。"""
     arguments = {
         "tenant_num": tenant_num,
         "task_code": task_code,
