@@ -36,11 +36,12 @@ JSON。
 | `adapter_extract_input` | 从调用方提供的日志文本中平衡提取 JSON | 否 |
 | `adapter_deploy` | 停用（若需要）、重新读取、保存、校验、恢复或按 `enable` 启用状态 | **是** |
 
-从 WebOps 参考实现吸收的增量能力按现有风格收敛为 15 个工具：
+从 WebOps 参考实现吸收的增量能力按现有风格收敛为 16 个工具：
 
 | 分组 | 工具 | 说明 |
 | --- | --- | --- |
 | 上下文 | `platform_context_get` / `platform_capabilities_list` | 返回脱敏认证状态、环境边界和已实现能力 |
+| 需求资产发现 | `platform_requirement_artifacts_search` | 按需求号聚合搜索 Adapter、Independent、CodeBlock、QueryBlock、API 发布和改写候选；不返回完整源码 |
 | 通用读取 | `platform_resource_search` / `platform_resource_get` | 查询 14 类封闭资源，不接受任意表名或 URL |
 | 元数据 | `platform_definition_get` / `platform_relations_get` / `platform_api_point_list` | 11 类定义可用资源的字段定义、脚本引用关系和 API 挂载点 |
 | 通用写入 | `platform_resource_create` / `platform_resource_save` / `platform_resource_delete` | 10 类已验证 Rel-Table CRUD；更新/删除强制版本条件 |
@@ -50,6 +51,12 @@ JSON。
 通用资源类型覆盖 Adapter/Independent Script 全览、Topic 消费端、API 发布、API 改写与挂载、
 功能数据导入配置、调度、常量、OutBound 白名单、CodeBlock、QueryBlock、脚本日志和 Adapter
 事件编码注册表。完整迁移取舍见 [WebOps 能力迁移说明](docs/webops-migration.md)。
+
+`platform_requirement_artifacts_search` 用于历史需求增量交付：它把规范化需求号作为描述字段过滤，
+在一次调用中返回六类资源的脱敏候选身份和扫描完整性；调用方随后仍须按类型调用精确 `get`。
+历史资源可能没有在描述中记录需求号，因此零结果或扫描不完整都不能证明资源不存在。通用
+`platform_resource_search(text=...)` 对 Rel-Table 使用 `description`，对 Adapter 列表也使用平台已
+验证的 `description` 参数，而不是假定所有端点都支持名为 `text` 的参数。
 
 核心原则是 **Debug First, Save Last**。Debug 工具不会保存、停用或启用任何脚本。只有用户
 明确说“保存 / 发布 / 部署 / 更新到 DEV”后才可生成写入计划；计划必须展示给用户，收到后续

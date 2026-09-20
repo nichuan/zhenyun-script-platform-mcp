@@ -89,6 +89,83 @@ class EventuallyVisibleClient(PlatformClient):
         return super().post(path, params=params, json=json)
 
 
+class RequirementSearchClient(PlatformClient):
+    def __init__(self):
+        super().__init__()
+
+    def get(self, path, *, params=None):
+        self.events.append(("GET", path, deepcopy(params), None))
+        if "adaptor-task-headers" in path:
+            return {
+                "content": [
+                    {
+                        "id": 11,
+                        "taskCode": "TASK_AFTER",
+                        "description": "CRO-4585 adapter change",
+                        "applyTenantNum": "SRM-DEMO",
+                        "runningService": "srm-source",
+                        "objectVersionNumber": 2,
+                        "adaptorTaskLines": [{"id": 101}],
+                    }
+                ],
+                "totalElements": 1,
+                "totalPages": 1,
+                "number": 0,
+                "size": 100,
+            }
+        return {"content": [], "totalElements": 0, "totalPages": 0}
+
+    def post(self, path, *, params=None, json=None):
+        self.events.append(("POST", path, deepcopy(params), deepcopy(json)))
+        records = []
+        if "marmot_script_library" in path:
+            records = [
+                {
+                    "id": 21,
+                    "code": "API_POST_SCRIPT",
+                    "description": "cro-4585 response extension",
+                    "tenantNum": "SRM-DEMO",
+                    "quickType": "API_POST",
+                    "objectVersionNumber": 3,
+                    "content": "function process(input) { return input; }",
+                },
+                {
+                    "id": 22,
+                    "code": "FALSE_POSITIVE",
+                    "description": "cro-45850 unrelated",
+                    "tenantNum": "SRM-DEMO",
+                },
+            ]
+        elif "sada_adaptor_code_block" in path:
+            records = [
+                {
+                    "id": 31,
+                    "blockCode": "COMMON_BLOCK",
+                    "description": "cro-4585 shared mapping",
+                    "tenantNum": "SRM-DEMO",
+                    "objectVersionNumber": 4,
+                }
+            ]
+        elif "marmot_api_publish" in path:
+            records = [
+                {
+                    "id": 41,
+                    "code": "PUBLISHED_API",
+                    "description": "CRO-4585 publish",
+                    "tenantNum": "SRM-DEMO",
+                    "scriptCode": "API_POST_SCRIPT",
+                    "objectVersionNumber": 5,
+                }
+            ]
+        return {
+            "content": records,
+            "totalElements": len(records),
+            "totalPages": 1 if records else 0,
+            "number": 0,
+            "size": 100,
+        }
+
+
 def settings():
     return Settings(
         base_url="https://gateway.dev.example.com",
@@ -114,6 +191,63 @@ def test_search_masks_secret_fields_and_reports_page():
     assert result["page"]["returned"] == 1
     assert result["records"][0]["value"] == "<REDACTED>"
     assert result["records"][0]["_token"] == "<REDACTED>"
+
+
+def test_adapter_text_search_uses_verified_description_parameter():
+    client = PlatformClient()
+    PlatformResourceService(client, settings()).search(
+        resource_type="adapter_task",
+        tenant="SRM-DEMO",
+        text="cro-4585",
+    )
+
+    request = next(event for event in client.events if event[0] == "GET")
+    assert request[2]["description"] == "cro-4585"
+    assert "text" not in request[2]
+
+
+def test_requirement_artifact_search_aggregates_and_filters_exact_demand_code():
+    client = RequirementSearchClient()
+    result = PlatformResourceService(client, settings()).search_requirement_artifacts(
+        requirement_code="CRO-4585",
+        tenant="SRM-DEMO",
+    )
+
+    assert result["normalized_search_term"] == "cro-4585"
+    assert result["total_matches"] == 4
+    assert result["complete"] is True
+    assert {match["code"] for match in result["matches"]} == {
+        "TASK_AFTER",
+        "API_POST_SCRIPT",
+        "COMMON_BLOCK",
+        "PUBLISHED_API",
+    }
+    assert "FALSE_POSITIVE" not in {match["code"] for match in result["matches"]}
+    assert all("record" not in match for match in result["matches"])
+    assert "function process" not in repr(result)
+    adapter_match = next(
+        match for match in result["matches"] if match["resource_type"] == "adapter_task"
+    )
+    assert adapter_match["line_ids"] == [101]
+    publish_match = next(
+        match for match in result["matches"] if match["resource_type"] == "api_publish"
+    )
+    assert publish_match["references"]["scriptCode"] == "API_POST_SCRIPT"
+    adapter_request = next(event for event in client.events if "adaptor-task-headers" in event[1])
+    assert adapter_request[2]["description"] == "cro-4585"
+    rel_table_requests = [event for event in client.events if event[0] == "POST"]
+    assert rel_table_requests
+    assert all(event[3]["description"] == "cro-4585" for event in rel_table_requests)
+    assert "Zero matches do not prove" in result["metadata_caveat"]
+
+
+def test_requirement_artifact_search_rejects_non_requirement_text():
+    client = RequirementSearchClient()
+    with pytest.raises(ValueError, match="requirement_code"):
+        PlatformResourceService(client, settings()).search_requirement_artifacts(
+            requirement_code="search anything"
+        )
+    assert client.events == []
 
 
 def test_definition_is_locally_parsed_without_mapping_blob():
@@ -217,7 +351,7 @@ def test_generic_independent_save_encodes_plain_text_changes():
             "code": "EDIT_SCRIPT",
             "tenantNum": "SRM-DEMO",
             "objectVersionNumber": 1,
-            "content": encode_platform_text("return old;")
+            "content": encode_platform_text("return old;"),
         }
     )
     result = PlatformResourceService(client, settings()).save(

@@ -18,7 +18,9 @@ from ..exceptions import (
     VersionConflictError,
 )
 from ..resources import (
+    REQUIREMENT_RESOURCE_TYPES,
     RESOURCES,
+    RequirementResourceType,
     ResourceDefinition,
     resource_definition,
     table_action,
@@ -168,7 +170,7 @@ class PlatformResourceService:
             if code:
                 params[definition.code_field] = code
             if text:
-                params["text"] = text
+                params[definition.text_param or "text"] = text
             payload = self._client.get(definition.list_path, params=params)
         elif definition.kind == "rel-table":
             body: dict[str, Any] = dict(page_params)
@@ -278,6 +280,159 @@ class PlatformResourceService:
             "records": [
                 self._public_record(definition, record, truncate=True) for record in outcome.records
             ],
+        }
+
+    @staticmethod
+    def _description_has_requirement(description: Any, requirement_code: str) -> bool:
+        if not isinstance(description, str):
+            return False
+        pattern = rf"(?<![A-Za-z0-9_]){re.escape(requirement_code)}(?![A-Za-z0-9_])"
+        return re.search(pattern, description, flags=re.IGNORECASE) is not None
+
+    @staticmethod
+    def _single_page_complete(page: dict[str, Any]) -> bool:
+        total_pages = page.get("total_pages")
+        if isinstance(total_pages, (int, float)):
+            return int(total_pages) <= 1
+        total_elements = page.get("total_elements")
+        returned = int(page.get("returned") or 0)
+        if isinstance(total_elements, (int, float)):
+            return int(total_elements) <= returned
+        return returned < int(page.get("size") or 0)
+
+    def search_requirement_artifacts(
+        self,
+        *,
+        requirement_code: str,
+        tenant: str | None = None,
+        resource_types: list[RequirementResourceType] | None = None,
+        size: int | None = None,
+    ) -> dict[str, Any]:
+        raw_code = requirement_code.strip()
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*-\d+", raw_code):
+            raise ValueError("requirement_code must look like cro-4585 or cdp-00000")
+        normalized_code = raw_code.lower()
+        actual_size = self._settings.max_page_size if size is None else size
+        self._validate_page(0, actual_size)
+        if tenant:
+            self._settings.assert_tenant(tenant)
+
+        requested_types = list(resource_types or REQUIREMENT_RESOURCE_TYPES)
+        selected_types = list(dict.fromkeys(requested_types))
+        if not selected_types:
+            raise ValueError("resource_types must contain at least one supported resource type")
+        unknown_types = sorted(set(selected_types) - set(REQUIREMENT_RESOURCE_TYPES))
+        if unknown_types:
+            raise ValueError(
+                "requirement artifact search does not support: " + ", ".join(unknown_types)
+            )
+
+        matches: list[dict[str, Any]] = []
+        scans: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        complete = True
+        for resource_type in selected_types:
+            try:
+                definition, outcome = self._search_raw(
+                    resource_type=resource_type,
+                    tenant=tenant,
+                    text=normalized_code,
+                    page=0,
+                    size=actual_size,
+                )
+                matched_records = [
+                    record
+                    for record in outcome.records
+                    if self._description_has_requirement(record.get("description"), normalized_code)
+                ]
+                scan_complete = self._single_page_complete(outcome.page)
+                complete = complete and scan_complete
+                scan = {
+                    "resource_type": resource_type,
+                    "label": definition.label,
+                    "returned": outcome.page["returned"],
+                    "matched": len(matched_records),
+                    "page": outcome.page,
+                    "complete": scan_complete,
+                }
+                if outcome.warnings:
+                    scan["warnings"] = outcome.warnings
+                    warnings.extend(outcome.warnings)
+                if not scan_complete:
+                    warning = (
+                        f"{resource_type} has more than one bounded result page; "
+                        "refine tenant or query that resource directly"
+                    )
+                    scan["warning"] = warning
+                    warnings.append(warning)
+                scans.append(scan)
+                for record in matched_records:
+                    lines = record.get("adaptorTaskLines")
+                    reference_fields = (
+                        "apiCode",
+                        "scriptCode",
+                        "beforeScriptCode",
+                        "codeBlockCode",
+                        "queryBlockCode",
+                    )
+                    matches.append(
+                        sanitize(
+                            {
+                                "resource_type": resource_type,
+                                "label": definition.label,
+                                "platform_id": definition.platform_id,
+                                "code_field": definition.code_field,
+                                "code": record.get(definition.code_field),
+                                "tenant": record.get(definition.tenant_field),
+                                "description": record.get("description"),
+                                "quick_type": record.get("quickType"),
+                                "running_service": record.get("runningService"),
+                                "line_count": len(lines) if isinstance(lines, list) else None,
+                                "line_ids": (
+                                    [line.get("id") for line in lines if isinstance(line, dict)]
+                                    if isinstance(lines, list)
+                                    else None
+                                ),
+                                "references": {
+                                    field: record.get(field)
+                                    for field in reference_fields
+                                    if record.get(field) not in {None, ""}
+                                },
+                                "id": record.get("id"),
+                                "object_version_number": record.get("objectVersionNumber"),
+                            }
+                        )
+                    )
+            except (ScriptPlatformError, TypeError, ValueError, KeyError) as exc:
+                complete = False
+                warning = (
+                    f"{resource_type} requirement search incomplete: {type(exc).__name__}: {exc}"
+                )
+                warnings.append(warning)
+                scans.append(
+                    {
+                        "resource_type": resource_type,
+                        "matched": 0,
+                        "complete": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+
+        return {
+            "requirement_code": raw_code,
+            "normalized_search_term": normalized_code,
+            "tenant": tenant,
+            "resource_types": selected_types,
+            "total_matches": len(matches),
+            "complete": complete,
+            "matches": matches,
+            "scans": scans,
+            "warnings": warnings,
+            "metadata_caveat": (
+                "Historical records may omit the requirement code in description. "
+                "Zero matches do not prove that no related artifact exists; fall back to issue "
+                "comments or known artifact codes, then use exact platform get tools."
+            ),
         }
 
     def _get_raw(
@@ -606,9 +761,7 @@ class PlatformResourceService:
         ]
 
     @staticmethod
-    def _validate_creation_fields(
-        definition: ResourceDefinition, record: dict[str, Any]
-    ) -> None:
+    def _validate_creation_fields(definition: ResourceDefinition, record: dict[str, Any]) -> None:
         if definition.platform_id != "marmot_script_library":
             return
         missing = [
@@ -618,9 +771,7 @@ class PlatformResourceService:
             or (isinstance(record.get(field), str) and not record[field].strip())
         ]
         if missing:
-            raise ValueError(
-                "independent_script create requires: " + ", ".join(missing)
-            )
+            raise ValueError("independent_script create requires: " + ", ".join(missing))
         code = record.get("code")
         if not isinstance(code, str) or not re.fullmatch(r"[A-Z0-9_]+", code):
             raise ValueError("independent_script code must contain only A-Z, 0-9, and _")
@@ -694,9 +845,7 @@ class PlatformResourceService:
         definition = self._assert_write_resource(resource_type, tenant)
         self._validate_create_request(definition, tenant, record)
         code = record[definition.code_field]
-        payload = self._encode_resource_text_fields(
-            definition, record, default_content=True
-        )
+        payload = self._encode_resource_text_fields(definition, record, default_content=True)
         payload = self._with_tenant(definition, tenant, payload)
         if definition.tenant_field != "tenantId":
             payload.setdefault("tenantId", 0)

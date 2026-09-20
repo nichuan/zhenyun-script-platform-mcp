@@ -9,6 +9,10 @@ def search_resources(service: PlatformResourceService, **kwargs: Any) -> dict[st
     return service.search(**kwargs)
 
 
+def search_requirement_artifacts(service: PlatformResourceService, **kwargs: Any) -> dict[str, Any]:
+    return service.search_requirement_artifacts(**kwargs)
+
+
 def get_resource(service: PlatformResourceService, **kwargs: Any) -> dict[str, Any]:
     return service.get(**kwargs)
 

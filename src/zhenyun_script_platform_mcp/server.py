@@ -18,7 +18,7 @@ from .client import ScriptPlatformClient
 from .config import Settings
 from .confirmation import ConfirmationManager
 from .exceptions import ScriptPlatformError
-from .resources import ResourceType
+from .resources import RequirementResourceType, ResourceType
 from .sanitizer import sanitize, sanitize_text
 from .services import (
     AdapterService,
@@ -297,6 +297,25 @@ def platform_resource_search(
             trace_id=trace_id,
             last_minutes=last_minutes,
             page=page,
+            size=size,
+        )
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
+def platform_requirement_artifacts_search(
+    requirement_code: str,
+    tenant: str | None = None,
+    resource_types: list[RequirementResourceType] | None = None,
+    size: int | None = None,
+) -> str:
+    """按需求号聚合检索 Adapter、Independent、CodeBlock、QueryBlock 与 API 关系资源；只读且不返回完整源码。"""
+    return _invoke(
+        lambda: platform_tools.search_requirement_artifacts(
+            get_runtime().platform,
+            requirement_code=requirement_code,
+            tenant=tenant,
+            resource_types=resource_types,
             size=size,
         )
     )

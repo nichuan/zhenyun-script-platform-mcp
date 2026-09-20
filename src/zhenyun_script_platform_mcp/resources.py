@@ -27,6 +27,22 @@ ResourceType = Literal[
     "script_log",
     "adapter_event",
 ]
+RequirementResourceType = Literal[
+    "adapter_task",
+    "independent_script",
+    "code_block",
+    "query_block",
+    "api_publish",
+    "api_rewrite",
+]
+REQUIREMENT_RESOURCE_TYPES: tuple[RequirementResourceType, ...] = (
+    "adapter_task",
+    "independent_script",
+    "code_block",
+    "query_block",
+    "api_publish",
+    "api_rewrite",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +59,7 @@ class ResourceDefinition:
     mask_fields: tuple[str, ...] = ()
     truncate_fields: tuple[str, ...] = ()
     validation_notes: tuple[str, ...] = ()
+    text_param: str | None = None
 
     @property
     def record_path(self) -> str:
@@ -63,6 +80,7 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "applyTenantNum",
         "applyTenantNum",
         definition_readable=False,
+        text_param="description",
     ),
     "independent_script": ResourceDefinition(
         "rel-table",

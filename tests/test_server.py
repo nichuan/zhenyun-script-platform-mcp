@@ -23,6 +23,7 @@ def test_server_exposes_lifecycle_and_verified_platform_tools():
         "platform_context_get",
         "platform_capabilities_list",
         "platform_resource_search",
+        "platform_requirement_artifacts_search",
         "platform_resource_get",
         "platform_definition_get",
         "platform_relations_get",
@@ -44,6 +45,7 @@ def test_tool_annotations_distinguish_reads_remote_execution_and_writes():
     assert tools["independent_script_create"].annotations.destructiveHint is True
     assert tools["independent_script_save"].annotations.destructiveHint is True
     assert tools["platform_resource_get"].annotations.readOnlyHint is True
+    assert tools["platform_requirement_artifacts_search"].annotations.readOnlyHint is True
     assert tools["platform_resource_save"].annotations.destructiveHint is True
     assert tools["platform_table_action"].annotations.destructiveHint is True
     assert {"permission", "module"} <= set(
