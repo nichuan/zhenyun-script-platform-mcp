@@ -9,7 +9,7 @@ from ..codec import encode_platform_text
 from ..config import Settings
 from ..exceptions import DebugExecutionError, InvalidFixtureError, NoValidFixtureError
 from ..models import DebugResult
-from ..sanitizer import sanitize, sanitize_text
+from ..sanitizer import sanitize, sanitize_text, validate_source_integrity
 
 
 class DebugClient(Protocol):
@@ -84,6 +84,7 @@ class DebugService:
         raw_input: Any,
         script_version: str | int | None = None,
     ) -> DebugResult:
+        validate_source_integrity(source)
         if self._settings is not None:
             self._settings.assert_tenant(tenant_num)
         params: dict[str, Any] = {"debugTenantNum": tenant_num}

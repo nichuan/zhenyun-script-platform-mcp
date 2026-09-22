@@ -366,6 +366,29 @@ def test_generic_independent_save_encodes_plain_text_changes():
     assert decode_platform_text(client.record["content"]) == "return new;"
 
 
+def test_generic_source_write_rejects_redaction_placeholder_before_lookup():
+    client = PlatformClient(
+        {
+            "id": 7,
+            "code": "EDIT_SCRIPT",
+            "tenantNum": "SRM-DEMO",
+            "objectVersionNumber": 1,
+            "content": encode_platform_text("return old;"),
+        }
+    )
+
+    with pytest.raises(ValueError, match="redaction placeholder"):
+        PlatformResourceService(client, settings()).save(
+            resource_type="independent_script",
+            tenant="SRM-DEMO",
+            code="EDIT_SCRIPT",
+            changes={"content": "return <REDACTED>;"},
+            expected_version=1,
+        )
+
+    assert client.events == []
+
+
 def test_independent_create_rejects_hidden_platform_constraints_locally():
     client = PlatformClient()
     service = PlatformResourceService(client, settings())
@@ -466,12 +489,17 @@ def test_generic_create_delete_and_table_action_use_verified_wire_shapes():
     assert delete_event[3]["updateScenario"] == "delete"
 
 
-def test_scheduler_requires_numeric_tenant_id_before_http_call():
+def test_scheduler_resolves_tenant_code_and_fails_when_lov_has_no_exact_match():
     client = PlatformClient()
     service = PlatformResourceService(client, settings())
-    with pytest.raises(ValueError, match="numeric tenantId"):
+    with pytest.raises(ValueError, match="could not be resolved"):
         service.search(resource_type="scheduler", tenant="SRM-ZHENYUN")
-    assert client.events == []
+    assert len(client.events) == 1
+    method, path, params, body = client.events[0]
+    assert method == "GET"
+    assert path == "/hpfm/v1/lovs/sql/data"
+    assert params["tenantNum"] == "SRM-ZHENYUN"
+    assert body is None
 
 
 def test_relations_do_not_silently_skip_scheduler_for_tenant_code():

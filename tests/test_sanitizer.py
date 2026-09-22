@@ -1,4 +1,11 @@
-from zhenyun_script_platform_mcp.sanitizer import REDACTED, sanitize, sanitize_text
+import pytest
+
+from zhenyun_script_platform_mcp.sanitizer import (
+    REDACTED,
+    sanitize,
+    sanitize_text,
+    validate_source_integrity,
+)
 
 
 def test_recursive_sensitive_key_redaction_is_case_insensitive():
@@ -72,3 +79,45 @@ def test_protocol_confirmation_token_is_not_redacted():
     cleaned = sanitize({"confirmation_token": "abc.def", "accessToken": "x"})
     assert cleaned["confirmation_token"] == "abc.def"
     assert cleaned["accessToken"] == REDACTED
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "headers:{Authorization:token}",
+        'headers:{"Authorization":"Bearer " + token}',
+        'const result = {"token":resp.id, "accessToken":appStore.token};',
+        '// Authorization is assigned by the runtime\nreturn input;',
+        'headers:{Authorization:"Bearer eyJhbGciOiJIUzI1NiJ9.literal"}',
+        "const 中文 = true;\r\n\treturn 中文;",
+    ],
+)
+def test_explicit_source_field_preserves_exact_text(source):
+    cleaned = sanitize(
+        {
+            "lines": [
+                {
+                    "source": source,
+                    "saved_test_input": {"_token": "fixture-secret", "openPassword": "pw"},
+                }
+            ]
+        },
+        preserve_fields=frozenset({"source"}),
+    )
+
+    assert cleaned["lines"][0]["source"] == source
+    assert cleaned["lines"][0]["saved_test_input"]["_token"] == REDACTED
+    assert cleaned["lines"][0]["saved_test_input"]["openPassword"] == REDACTED
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    ["<REDACTED>", "<<REDACTED:7>>", "__MASKED_ON_READ_VERIFY_BEFORE_DEPLOY__", "<MASKED>"],
+)
+def test_source_integrity_rejects_redaction_placeholders(placeholder):
+    with pytest.raises(ValueError, match="redaction placeholder"):
+        validate_source_integrity(f"return {placeholder};")
+
+
+def test_source_integrity_allows_normal_mask_identifiers():
+    validate_source_integrity("const mask = input.mask; return mask;")

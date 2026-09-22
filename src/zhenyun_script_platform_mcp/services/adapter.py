@@ -17,6 +17,7 @@ from ..exceptions import (
     VersionConflictError,
 )
 from ..models import Adapter, AdapterLine, DebugResult
+from ..sanitizer import validate_source_integrity
 from .common import bool_value, extract_items, versions_equal
 from .debug import DebugService
 from .fixture import parse_encoded_fixture
@@ -173,6 +174,7 @@ class AdapterService:
         raw_input: Any,
         line_id: str | int | None = None,
     ) -> DebugResult:
+        validate_source_integrity(source)
         snapshot = self._get_snapshot(
             tenant_num=tenant_num,
             task_code=task_code,
@@ -467,6 +469,7 @@ class AdapterService:
         expected_line_version: str | int | None = None,
         enable: bool = False,
     ) -> dict[str, Any]:
+        validate_source_integrity(source)
         original = self._get_snapshot(
             tenant_num=tenant_num,
             task_code=task_code,

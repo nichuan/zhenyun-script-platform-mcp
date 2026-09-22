@@ -55,8 +55,11 @@ JSON。
 `platform_requirement_artifacts_search` 用于历史需求增量交付：它把规范化需求号作为描述字段过滤，
 在一次调用中返回六类资源的脱敏候选身份和扫描完整性；调用方随后仍须按类型调用精确 `get`。
 历史资源可能没有在描述中记录需求号，因此零结果或扫描不完整都不能证明资源不存在。通用
-`platform_resource_search(text=...)` 对 Rel-Table 使用 `description`，对 Adapter 列表也使用平台已
-验证的 `description` 参数，而不是假定所有端点都支持名为 `text` 的参数。
+`platform_resource_search` 保留 `code` / `text` 快捷参数，并支持受逐资源白名单约束的
+`filters` 组合条件。`text` 只会映射到该资源已验证的原生字段，例如普通描述使用
+`description`、Adapter 全览使用 `text`、OutBound 白名单使用 `remark`；Topic 消费端和调度没有
+已验证的通用文本字段，传入 `text` 会在本地拒绝。调度查询既可传数字 `tenantId`，也可传租户
+编码，后者会通过固定 `HPFM.TENANT_PAGING` LOV 精确解析。
 
 核心原则是 **Debug First, Save Last**。Debug 工具不会保存、停用或启用任何脚本。只有用户
 明确说“保存 / 发布 / 部署 / 更新到 DEV”后才可生成写入计划；计划必须展示给用户，收到后续
@@ -145,6 +148,28 @@ uv run zhenyun-script-platform-auth status
 如桌面环境允许 Keychain 解锁，可加 `--storage keychain`。已有私有账号/Token 文件可分别用
 `import-credentials --from-file ...` 和 `import-token --from-file ...` 迁移。
 
+## 通用资源检索边界
+
+- `filters` 只接受当前 `resource_type` 登记的原生字段，未知字段在发请求前拒绝；租户字段不能
+  藏在 `filters` 中，必须使用专用 `tenant` 参数。
+- API 改写可组合 `serverName`、`beanName`、`methodName`、`beforeScriptCode`、`scriptCode` 等条件；
+  Adapter、独立脚本、CodeBlock 和 QueryBlock 也开放各自已验证的状态、服务、类型与模块字段。
+- `script_log` 支持 `trace_id`、`script_type`、`last_minutes` 和 `log_detail`；日志类型只允许
+  `ADAPTOR` / `SCRIPT_LIB` / `REL_ACTION`，时间窗只允许页面 LOV 的 `0/15/30/60/120`。
+- `log_detail=true` 使用 `/sada/v1/script-log-records/query-by-id`，并强制同时提供租户、任务编码、
+  traceId 和脚本类型，避免宽泛详情查询。
+- `old_total_elements` 只用于相同条件的后续分页，值必须为非负整数。
+
+例如按服务、方法和后置脚本组合筛选 API 改写：
+
+```text
+platform_resource_search(
+  resource_type="api_rewrite",
+  tenant="SRM-ZHENYUN",
+  filters={"serverName":"srm-po","methodName":"save","scriptCode":"PO_SAVE_POST"}
+)
+```
+
 ## 通用资源写入边界
 
 - `resource_type` 是固定枚举；工具不接受任意 URL、路径或表名。
@@ -177,6 +202,16 @@ uv run zhenyun-script-platform-auth status
 调试优先使用工具显式传入的 `raw_input`，其次使用有效的保存 Fixture。最近真实 Input 应由
 Pangu 查询日志，再把日志文本交给 `adapter_extract_input`；本 MCP 不自行访问 Loki/SLS，也
 不会编造复杂业务 DTO。
+
+## 源码完整性与脱敏
+
+`adapter_get` 和 `independent_script_get` 的源码字段会按平台原文返回，不经过关键字级文本脱敏；
+CodeBlock 的 `content`、QueryBlock 的 `sqlContent/countSql` 也采用相同规则。Fixture、认证元数据、
+错误详情及普通响应字段仍按敏感键脱敏。因此调用方可以直接校验
+`sha256(source UTF-8 bytes) == source_hash`，中文、制表符和 CRLF 均保持不变。
+
+所有源码保存、部署和远程调试入口会在发起平台请求前拒绝 `<REDACTED>`、`<MASKED>`、
+`<<REDACTED:length>>`、`__MASKED_*__` 等脱敏占位符，防止残缺源码进入调试或持久化链路。
 
 ## Adapter 部署生命周期
 

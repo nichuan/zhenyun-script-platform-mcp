@@ -10,6 +10,7 @@ from ..codec import decode_platform_text, encode_platform_text, source_hash
 from ..config import Settings
 from ..exceptions import NotFoundError, SaveVerificationError, VersionConflictError
 from ..models import IndependentScript
+from ..sanitizer import validate_source_integrity
 from .common import extract_items, versions_equal
 from .fixture import parse_encoded_fixture
 
@@ -89,6 +90,7 @@ class IndependentScriptService:
         source: str,
         expected_version: str | int | None = None,
     ) -> dict[str, Any]:
+        validate_source_integrity(source)
         before = self._get_snapshot(tenant_num=tenant_num, code=code)
         actual_version = before.public.object_version_number
         if expected_version is not None and not versions_equal(expected_version, actual_version):

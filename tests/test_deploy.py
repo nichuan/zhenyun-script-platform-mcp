@@ -139,3 +139,16 @@ def test_deploy_version_conflicts_happen_before_state_change(write_settings, kwa
         deploy(AdapterService(client, write_settings), **kwargs)
     assert detail_key in error.value.details
     assert client.events == ["GET"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["return <REDACTED>;", "return __MASKED_ON_READ_VERIFY_BEFORE_DEPLOY__;"],
+)
+def test_deploy_rejects_masked_source_before_remote_read(write_settings, source):
+    client = FakeAdapterClient(enabled=True)
+
+    with pytest.raises(ValueError, match="redaction placeholder"):
+        deploy(AdapterService(client, write_settings), source=source)
+
+    assert client.events == []

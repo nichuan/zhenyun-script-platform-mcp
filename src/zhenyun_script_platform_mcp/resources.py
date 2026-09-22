@@ -54,12 +54,15 @@ class ResourceDefinition:
     list_path: str
     tenant_param: str
     tenant_field: str
+    query_fields: tuple[str, ...] = ()
+    query_wire_types: tuple[tuple[str, str], ...] = ()
+    text_param: str | None = None
     writable: bool = False
     definition_readable: bool = True
     mask_fields: tuple[str, ...] = ()
     truncate_fields: tuple[str, ...] = ()
+    source_fields: tuple[str, ...] = ()
     validation_notes: tuple[str, ...] = ()
-    text_param: str | None = None
 
     @property
     def record_path(self) -> str:
@@ -79,6 +82,8 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/adaptor-task-headers",
         "applyTenantNum",
         "applyTenantNum",
+        query_fields=("taskCode", "description", "runningService", "enabledFlag"),
+        query_wire_types=(("enabledFlag", "string-boolean"),),
         definition_readable=False,
         text_param="description",
     ),
@@ -90,8 +95,11 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/rel-table-records/marmot_script_library/page",
         "tenantNum",
         "tenantNum",
+        query_fields=("code", "quickType", "description", "module"),
+        text_param="description",
         writable=True,
         truncate_fields=("content", "contentInput"),
+        source_fields=("content",),
         validation_notes=(
             "code must contain only uppercase letters, digits, and underscores",
             "description must start with a demand code such as cdp-00000",
@@ -107,6 +115,8 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/adaptor-script/search",
         "applyTenantNum",
         "applyTenantNum",
+        query_fields=("taskCode", "text", "description", "scriptVersion", "runningService"),
+        text_param="text",
         definition_readable=False,
     ),
     "queue_consumer": ResourceDefinition(
@@ -117,6 +127,7 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/rel-table-records/marmot_queue_consumer/page",
         "tenantNum",
         "tenantNum",
+        query_fields=("topic",),
         writable=True,
     ),
     "api_publish": ResourceDefinition(
@@ -127,6 +138,8 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/rel-table-records/marmot_api_publish/page",
         "tenantNum",
         "tenantNum",
+        query_fields=("code", "scriptCode", "description", "url"),
+        text_param="description",
         writable=True,
     ),
     "api_rewrite": ResourceDefinition(
@@ -137,6 +150,16 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/rel-table-records/marmot_api_rewrite/page",
         "tenantNum",
         "tenantNum",
+        query_fields=(
+            "apiCode",
+            "serverName",
+            "beanName",
+            "methodName",
+            "beforeScriptCode",
+            "scriptCode",
+            "description",
+        ),
+        text_param="description",
         writable=True,
     ),
     "data_import": ResourceDefinition(
@@ -147,6 +170,8 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/rel-table-records/marmot_data_import/page",
         "tenantNum",
         "tenantNum",
+        query_fields=("templateCode", "description"),
+        text_param="description",
         writable=True,
     ),
     "scheduler": ResourceDefinition(
@@ -157,6 +182,7 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/rel-table-records/marmot_scheduler/page",
         "tenantId",
         "tenantId",
+        query_fields=("jobCode", "scriptCode"),
         writable=True,
     ),
     "constant": ResourceDefinition(
@@ -167,6 +193,8 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/rel-table-records/sada_adaptor_constants/page",
         "tenantNum",
         "tenantNum",
+        query_fields=("constantCode", "description"),
+        text_param="description",
         writable=True,
         mask_fields=("value",),
     ),
@@ -178,6 +206,8 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/rel-table-records/marmot_script_outbound_whitelist/page",
         "tenantNum",
         "tenantNum",
+        query_fields=("host", "remark"),
+        text_param="remark",
         writable=True,
     ),
     "code_block": ResourceDefinition(
@@ -188,8 +218,11 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/rel-table-records/sada_adaptor_code_block/page",
         "tenantNum",
         "tenantNum",
+        query_fields=("blockCode", "description", "module"),
+        text_param="description",
         writable=True,
         truncate_fields=("content",),
+        source_fields=("content",),
     ),
     "query_block": ResourceDefinition(
         "rel-table",
@@ -199,8 +232,11 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/rel-table-records/sada_adaptor_query_block/page",
         "tenantNum",
         "tenantNum",
+        query_fields=("queryBlockCode", "description", "module"),
+        text_param="description",
         writable=True,
         truncate_fields=("sqlContent", "countSql"),
+        source_fields=("sqlContent", "countSql"),
     ),
     "script_log": ResourceDefinition(
         "script-log",
@@ -210,6 +246,8 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/sada/v1/script-log-records/query",
         "tenantNum",
         "tenantNum",
+        query_fields=("taskCode", "content", "scriptType", "lastMinutes", "traceId"),
+        text_param="content",
         definition_readable=False,
         truncate_fields=("content",),
     ),
@@ -221,6 +259,8 @@ RESOURCES: dict[str, ResourceDefinition] = {
         "/spfm/v1/rel-table-records/adaptor_static_code/page",
         "tenantId",
         "tenantId",
+        query_fields=("taskCode", "service", "description"),
+        text_param="description",
     ),
 }
 

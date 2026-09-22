@@ -88,3 +88,18 @@ def test_independent_version_conflict_prevents_put():
             expected_version=9,
         )
     assert client.put_payload is None
+
+
+def test_independent_save_rejects_masked_source_before_lookup():
+    client = IndependentClient()
+
+    with pytest.raises(ValueError, match="redaction placeholder"):
+        IndependentScriptService(client, settings()).save(
+            tenant_num="SRM-DEMO",
+            code="AFTER_API",
+            source="return __MASKED_ON_READ_VERIFY_BEFORE_DEPLOY__;",
+            expected_version=10,
+        )
+
+    assert client.post_calls == 0
+    assert client.put_payload is None

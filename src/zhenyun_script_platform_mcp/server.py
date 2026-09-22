@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Settings as FastMCPSettings
@@ -18,8 +18,8 @@ from .client import ScriptPlatformClient
 from .config import Settings
 from .confirmation import ConfirmationManager
 from .exceptions import ScriptPlatformError
-from .resources import RequirementResourceType, ResourceType
-from .sanitizer import sanitize, sanitize_text
+from .resources import RequirementResourceType, ResourceType, resource_definition
+from .sanitizer import sanitize, sanitize_text, validate_source_integrity
 from .services import (
     AdapterService,
     DebugService,
@@ -85,9 +85,11 @@ def _serialize(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
-def _invoke(action: Callable[[], Any]) -> str:
+def _invoke(
+    action: Callable[[], Any], *, preserve_fields: frozenset[str] = frozenset()
+) -> str:
     try:
-        result = sanitize(action())
+        result = sanitize(action(), preserve_fields=preserve_fields)
         if isinstance(result, dict):
             return _serialize({"ok": "error" not in result, **result})
         return _serialize({"ok": True, "result": result})
@@ -207,6 +209,7 @@ def _invoke_write(
     confirmation_token: str | None,
     action: Callable[[], Any],
     preflight: Callable[[], Any] | None = None,
+    preserve_fields: frozenset[str] = frozenset(),
 ) -> str:
     def guarded() -> Any:
         runtime = get_runtime()
@@ -228,7 +231,7 @@ def _invoke_write(
             return {**result, "human_confirmation": "verified"}
         return {"result": result, "human_confirmation": "verified"}
 
-    return _invoke(guarded)
+    return _invoke(guarded, preserve_fields=preserve_fields)
 
 
 READ_ONLY = ToolAnnotations(
@@ -281,12 +284,20 @@ def platform_resource_search(
     tenant: str | None = None,
     code: str | None = None,
     text: str | None = None,
+    filters: dict[str, Any] | None = None,
     trace_id: str | None = None,
-    last_minutes: int = 60,
+    script_type: Literal["ADAPTOR", "SCRIPT_LIB", "REL_ACTION"] | None = None,
+    log_detail: bool = False,
+    last_minutes: Literal[0, 15, 30, 60, 120] | None = None,
+    old_total_elements: int | None = None,
     page: int = 0,
     size: int | None = None,
 ) -> str:
-    """按封闭 resource_type 检索已验证的平台资源；列表文本有界且秘密常量脱敏，返回 ok 或 error.retryable。"""
+    """按逐资源字段白名单组合检索并返回脱敏分页结果。
+
+    code/text 是常用字段快捷入口；filters 接受当前资源 capability 中登记的原生字段。
+    script_log 额外支持 trace_id、script_type、last_minutes 和 log_detail。
+    """
     return _invoke(
         lambda: platform_tools.search_resources(
             get_runtime().platform,
@@ -294,11 +305,16 @@ def platform_resource_search(
             tenant=tenant,
             code=code,
             text=text,
+            filters=filters,
             trace_id=trace_id,
+            script_type=script_type,
+            log_detail=log_detail,
             last_minutes=last_minutes,
+            old_total_elements=old_total_elements,
             page=page,
             size=size,
-        )
+        ),
+        preserve_fields=frozenset(resource_definition(resource_type).source_fields),
     )
 
 
@@ -334,7 +350,8 @@ def platform_resource_get(
             resource_type=resource_type,
             code=code,
             tenant=tenant,
-        )
+        ),
+        preserve_fields=frozenset(resource_definition(resource_type).source_fields),
     )
 
 
@@ -408,6 +425,7 @@ def platform_resource_create(
             tenant=tenant,
             record=record,
         ),
+        preserve_fields=frozenset(resource_definition(resource_type).source_fields),
     )
 
 
@@ -510,7 +528,8 @@ def independent_script_get(tenant_num: str, code: str) -> str:
     return _invoke(
         lambda: independent_tools.get_script(
             get_runtime().independent, tenant_num=tenant_num, code=code
-        )
+        ),
+        preserve_fields=frozenset({"source"}),
     )
 
 
@@ -557,6 +576,7 @@ def independent_script_create(
             tenant=tenant_num,
             record=record,
         ),
+        preserve_fields=frozenset({"content"}),
     )
 
 
@@ -592,6 +612,7 @@ def independent_script_save(
         tool="independent_script_save",
         arguments=arguments,
         confirmation_token=confirmation_token,
+        preflight=lambda: validate_source_integrity(source),
         action=lambda: independent_tools.save_script(
             get_runtime().independent,
             tenant_num=tenant_num,
@@ -611,7 +632,8 @@ def adapter_get(tenant_num: str, task_code: str, running_service: str) -> str:
             tenant_num=tenant_num,
             task_code=task_code,
             running_service=running_service,
-        )
+        ),
+        preserve_fields=frozenset({"source"}),
     )
 
 
@@ -806,6 +828,7 @@ def adapter_deploy(
         tool="adapter_deploy",
         arguments=arguments,
         confirmation_token=confirmation_token,
+        preflight=lambda: validate_source_integrity(source),
         action=lambda: adapter_tools.deploy_adapter(
             get_runtime().adapter,
             tenant_num=tenant_num,

@@ -1,9 +1,21 @@
+import hashlib
 import json
 from types import SimpleNamespace
 
+from conftest import FakeAdapterClient
+
+from zhenyun_script_platform_mcp.codec import encode_platform_text
+from zhenyun_script_platform_mcp.config import Settings
 from zhenyun_script_platform_mcp.confirmation import ConfirmationManager
 from zhenyun_script_platform_mcp.exceptions import VersionConflictError
-from zhenyun_script_platform_mcp.server import _invoke, _invoke_write, _write_preview, mcp
+from zhenyun_script_platform_mcp.server import (
+    _invoke,
+    _invoke_write,
+    _write_preview,
+    adapter_get,
+    mcp,
+)
+from zhenyun_script_platform_mcp.services.adapter import AdapterService
 
 
 def test_server_exposes_lifecycle_and_verified_platform_tools():
@@ -118,6 +130,77 @@ def test_write_preview_warns_about_script_companion_resources():
 def test_returned_partial_failure_is_not_marked_ok():
     result = json.loads(_invoke(lambda: {"saved": False, "error": {"code": "SAVE_FAILED"}}))
     assert result["ok"] is False
+
+
+def test_source_boundary_preserves_adapter_bytes_and_hash_while_masking_fixture():
+    source = (
+        'let params = {url:url + "?token=" + token,'
+        "fileInfos:files,headers:{Authorization:token},body:{}};\r\n"
+        "\treturn params; // 中文"
+    )
+    expected_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+    result = json.loads(
+        _invoke(
+            lambda: {
+                "lines": [
+                    {
+                        "source": source,
+                        "source_hash": expected_hash,
+                        "saved_test_input": {"_token": "secret", "openPassword": "pw"},
+                    }
+                ]
+            },
+            preserve_fields=frozenset({"source"}),
+        )
+    )
+
+    line = result["lines"][0]
+    assert line["source"] == source
+    assert hashlib.sha256(line["source"].encode("utf-8")).hexdigest() == line["source_hash"]
+    assert line["saved_test_input"]["_token"] == "<REDACTED>"
+    assert line["saved_test_input"]["openPassword"] == "<REDACTED>"
+
+
+def test_adapter_get_to_deploy_round_trip_keeps_source_hash(monkeypatch):
+    source = (
+        'let params = {url:url + "?token=" + token,'
+        "fileInfos:files,headers:{Authorization:token},body:{}};\r\n"
+        "\treturn params; // 中文"
+    )
+    client = FakeAdapterClient(enabled=False)
+    client.header["adaptorTaskLines"][0]["scriptContent"] = encode_platform_text(source)
+    client.header["adaptorTaskLines"][0]["inputContent"] = encode_platform_text(
+        '{"_token":"fixture-secret","openPassword":"pw"}'
+    )
+    service = AdapterService(client, Settings(base_url="https://gateway.dev.example.com"))
+    monkeypatch.setattr(
+        "zhenyun_script_platform_mcp.server.get_runtime",
+        lambda: SimpleNamespace(adapter=service),
+    )
+
+    loaded = json.loads(
+        adapter_get(
+            tenant_num="SRM-DEMO",
+            task_code="TASK",
+            running_service="srm-source",
+        )
+    )
+    line = loaded["lines"][0]
+    assert line["source"] == source
+    assert hashlib.sha256(line["source"].encode("utf-8")).hexdigest() == line["source_hash"]
+    assert line["saved_test_input"]["_token"] == "<REDACTED>"
+    assert line["saved_test_input"]["openPassword"] == "<REDACTED>"
+
+    deployed = service.deploy(
+        tenant_num="SRM-DEMO",
+        task_code="TASK",
+        running_service="srm-source",
+        source=line["source"],
+        expected_header_version=loaded["object_version_number"],
+        expected_line_version=line["object_version_number"],
+    )
+    assert deployed["old_hash"] == deployed["new_hash"] == line["source_hash"]
 
 
 def test_first_write_call_only_returns_plan_and_does_not_run_action(monkeypatch):

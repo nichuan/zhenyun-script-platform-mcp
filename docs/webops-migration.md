@@ -11,7 +11,7 @@
 | 参考能力 | 当前落点 | 处理 |
 | --- | --- | --- |
 | context / capabilities | `platform_context_get` / `platform_capabilities_list` | 已迁移；认证信息只返回元数据 |
-| 14 类资源检索与详情 | `platform_resource_search/get` | 已迁移；封闭枚举、分页上限、租户回读、字段脱敏 |
+| 14 类资源检索与详情 | `platform_resource_search/get` | 已迁移；逐资源查询字段白名单、组合筛选、分页上限、租户回读、字段脱敏 |
 | Rel-Table 字段定义 | `platform_definition_get` | 已迁移；本地解析 `mappingInfo/mappingJson`，不回传大 JSON 原文；DEV 实测 11 类可用，3 类无表规则/权限并 fail-closed |
 | 脚本引用关系 | `platform_relations_get` | 已迁移；明确标注有界扫描，未命中不等于不存在 |
 | API 挂载点 | `platform_api_point_list` | 已迁移；保留 `classBeanName -> beanName` 映射说明 |
@@ -48,3 +48,8 @@
   401/失效包络时才重新认证并把原请求重试一次。
 - 14 类资源查询全部可用，但 Adapter 任务、Adapter 全览和脚本日志没有可用字段定义；能力清单会
   把这 3 类标记为 `definition=false`，不把 403 或“无表规则”伪装成可支持能力。
+- 通用检索不再把所有 Rel-Table 的 `text` 强制映射成 `description`；每类资源登记自己的
+  `text_param` 和 `query_fields`，额外组合条件必须经过白名单。调度查询可把租户编码通过固定
+  `HPFM.TENANT_PAGING` LOV 精确转换为数字 `tenantId`。
+- 源码正文使用显式字段白名单绕过关键字级脱敏，保证 `adapter_get.source` 与 `source_hash`
+  字节一致；Fixture 和普通元数据继续脱敏。保存、部署和远程调试会预先拒绝已知脱敏占位符。

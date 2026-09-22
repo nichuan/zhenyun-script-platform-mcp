@@ -57,6 +57,9 @@ _TEXT_SECRET = re.compile(
     r"(\s*[:=]\s*)(Bearer\s+[A-Za-z0-9._~+/=-]+|[^\s,;]+|\"[^\"]*\")"
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_MASKED_SOURCE = re.compile(
+    r"(?i)(?:<<?(?:redacted|masked)(?::\d+)?>>?|__(?:redacted|masked)(?:_[a-z0-9]+)*__)"
+)
 
 
 def _normalize_key(key: object) -> str:
@@ -80,17 +83,41 @@ def sanitize_text(value: str) -> str:
     return _BEARER.sub("Bearer <REDACTED>", value)
 
 
-def sanitize(value: Any) -> Any:
+def sanitize(value: Any, *, preserve_fields: frozenset[str] = frozenset()) -> Any:
+    """Redact secrets recursively while preserving explicitly trusted text fields.
+
+    Source code is an MCP deliverable whose bytes must survive a get/edit/write round trip.
+    Callers must opt specific source field names into ``preserve_fields``; all other strings,
+    including saved fixtures and error text, continue through the normal redaction rules.
+    """
     if isinstance(value, Mapping):
-        return {
-            str(key): REDACTED if _key_is_sensitive(key) else sanitize(item)
-            for key, item in value.items()
-        }
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            public_key = str(key)
+            if _key_is_sensitive(key):
+                cleaned[public_key] = REDACTED
+            elif public_key in preserve_fields and isinstance(item, str):
+                cleaned[public_key] = item
+            else:
+                cleaned[public_key] = sanitize(item, preserve_fields=preserve_fields)
+        return cleaned
     if isinstance(value, list):
-        return [sanitize(item) for item in value]
+        return [sanitize(item, preserve_fields=preserve_fields) for item in value]
     if isinstance(value, tuple):
-        return tuple(sanitize(item) for item in value)
+        return tuple(sanitize(item, preserve_fields=preserve_fields) for item in value)
     if isinstance(value, str):
         # 字符串值同样过文本脱敏：覆盖响应正文/错误详情里内嵌的凭据。
         return sanitize_text(value)
     return value
+
+
+def validate_source_integrity(source: str) -> None:
+    """Reject known redaction placeholders before source reaches debug or persistence APIs."""
+    if not isinstance(source, str):
+        raise TypeError("source must be a string")
+    match = _MASKED_SOURCE.search(source)
+    if match:
+        raise ValueError(
+            "Source contains a redaction placeholder "
+            f"{match.group(0)!r}; reload the original source before debug or save"
+        )

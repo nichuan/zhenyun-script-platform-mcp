@@ -75,3 +75,16 @@ def test_debug_requires_nonempty_tenant():
         DebugService(client, restricted).run(tenant_num="", source="x", raw_input={})
 
     assert client.call is None
+
+
+def test_debug_rejects_masked_source_before_remote_execution():
+    client = DebugClient({})
+
+    with pytest.raises(ValueError, match="redaction placeholder"):
+        DebugService(client).run(
+            tenant_num="SRM-DEMO",
+            source="return <REDACTED>;",
+            raw_input={},
+        )
+
+    assert client.call is None

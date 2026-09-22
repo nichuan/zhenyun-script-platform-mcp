@@ -25,7 +25,7 @@ from ..resources import (
     resource_definition,
     table_action,
 )
-from ..sanitizer import REDACTED, sanitize
+from ..sanitizer import REDACTED, sanitize, validate_source_integrity
 from .common import extract_items, versions_equal
 
 
@@ -69,6 +69,13 @@ class PlatformResourceService:
     API_POINT_PATH = "/marmot/v1/0/marmot-api-rewrite/api/point/list"
     DEFINITION_PREFIX = "/sada/v1/rel-table-definitions/find"
     ACTION_PATH = "/sada/v1/rel-table-actions/execute"
+    SCRIPT_LOG_DETAIL_PATH = "/sada/v1/script-log-records/query-by-id"
+    TENANT_LOV_PATH = "/hpfm/v1/lovs/sql/data"
+    TENANT_LOV_CODE = "HPFM.TENANT_PAGING"
+    _LOG_MINUTES: ClassVar[frozenset[int]] = frozenset({0, 15, 30, 60, 120})
+    _LOG_TYPES: ClassVar[frozenset[str]] = frozenset(
+        {"ADAPTOR", "SCRIPT_LIB", "REL_ACTION"}
+    )
     _PROTECTED_FIELDS: ClassVar[frozenset[str]] = frozenset(
         {
             "id",
@@ -94,6 +101,9 @@ class PlatformResourceService:
                     "label": definition.label,
                     "platform_id": definition.platform_id,
                     "code_field": definition.code_field,
+                    "query_fields": list(definition.query_fields),
+                    "query_wire_types": dict(definition.query_wire_types),
+                    "text_param": definition.text_param,
                     "read": True,
                     "definition": definition.definition_readable,
                     "write": definition.writable,
@@ -135,6 +145,162 @@ class PlatformResourceService:
         if size < 1 or size > self._settings.max_page_size:
             raise ValueError(f"size must be between 1 and {self._settings.max_page_size}")
 
+    @staticmethod
+    def _put_filter(
+        result: dict[str, Any], field: str, value: Any, *, source: str
+    ) -> None:
+        if value is None or value == "":
+            return
+        if field in result and result[field] != value:
+            raise ValueError(
+                f"Query field {field!r} conflicts between filters and {source}"
+            )
+        result[field] = value
+
+    def _query_filters(
+        self,
+        *,
+        definition: ResourceDefinition,
+        resource_type: str,
+        filters: dict[str, Any] | None,
+        code: str | None,
+        text: str | None,
+        trace_id: str | None,
+        script_type: str | None,
+        last_minutes: int | None,
+    ) -> dict[str, Any]:
+        if filters is not None and not isinstance(filters, dict):
+            raise TypeError("filters must be an object")
+        native = {
+            key: value
+            for key, value in (filters or {}).items()
+            if value is not None and value != ""
+        }
+        if any(not isinstance(key, str) for key in native):
+            raise TypeError("filters keys must be strings")
+        non_scalar = sorted(
+            key
+            for key, value in native.items()
+            if not isinstance(value, (str, int, float, bool))
+        )
+        if non_scalar:
+            raise TypeError(
+                "Query filter values must be strings, numbers, or booleans: "
+                + ", ".join(non_scalar)
+            )
+        tenant_fields = {definition.tenant_param, definition.tenant_field}
+        embedded_tenant = sorted(set(native) & tenant_fields)
+        if embedded_tenant:
+            raise ValueError(
+                "Tenant fields must use the dedicated tenant argument: "
+                + ", ".join(embedded_tenant)
+            )
+        unknown = sorted(set(native) - set(definition.query_fields))
+        if unknown:
+            allowed = ", ".join(definition.query_fields) or "none"
+            raise ValueError(
+                f"Unsupported query fields for {resource_type}: {', '.join(unknown)}; "
+                f"allowed fields: {allowed}"
+            )
+
+        for field, wire_type in definition.query_wire_types:
+            if field not in native:
+                continue
+            value = native[field]
+            if wire_type == "string-boolean":
+                if isinstance(value, bool):
+                    native[field] = "true" if value else "false"
+                elif value not in {"true", "false", "1", "0"}:
+                    raise ValueError(
+                        f"Query field {field!r} must be true/false/1/0 or a boolean"
+                    )
+
+        self._put_filter(native, definition.code_field, code, source="code")
+        if text is not None and text != "":
+            if definition.text_param is None:
+                raise ValueError(
+                    f"Resource {resource_type!r} has no verified text filter; use its allowed "
+                    "fields instead"
+                )
+            self._put_filter(native, definition.text_param, text, source="text")
+
+        if definition.kind != "script-log":
+            if trace_id is not None:
+                raise ValueError("trace_id is only supported for script_log")
+            if script_type is not None:
+                raise ValueError("script_type is only supported for script_log")
+            if last_minutes is not None:
+                raise ValueError("last_minutes is only supported for script_log")
+            return native
+
+        self._put_filter(native, "traceId", trace_id, source="trace_id")
+        self._put_filter(native, "scriptType", script_type, source="script_type")
+        if "scriptType" in native and native["scriptType"] not in self._LOG_TYPES:
+            raise ValueError(
+                "scriptType must be one of ADAPTOR, SCRIPT_LIB, or REL_ACTION"
+            )
+
+        configured_minutes = native.get(
+            "lastMinutes", 60 if last_minutes is None else last_minutes
+        )
+        try:
+            parsed_minutes = int(configured_minutes)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("lastMinutes must be one of 0, 15, 30, 60, or 120") from exc
+        if parsed_minutes not in self._LOG_MINUTES:
+            raise ValueError("lastMinutes must be one of 0, 15, 30, 60, or 120")
+        if (
+            last_minutes is not None
+            and "lastMinutes" in native
+            and int(native["lastMinutes"]) != last_minutes
+        ):
+            raise ValueError(
+                "Query field 'lastMinutes' conflicts between filters and last_minutes"
+            )
+        native["lastMinutes"] = str(parsed_minutes)
+        return native
+
+    def _query_tenant_value(
+        self,
+        *,
+        definition: ResourceDefinition,
+        resource_type: str,
+        tenant: str | None,
+    ) -> str | int | None:
+        if not tenant or resource_type == "adapter_event":
+            return None
+        if definition.tenant_field != "tenantId":
+            return tenant
+        if tenant.isdigit():
+            return int(tenant)
+
+        payload = self._client.get(
+            self.TENANT_LOV_PATH,
+            params={
+                "lovCode": self.TENANT_LOV_CODE,
+                "tenantNum": tenant,
+                "page": 0,
+                "size": 20,
+                "asyncCountFlag": "Y",
+            },
+        )
+        tenant_ids = {
+            str(item.get("tenantId"))
+            for item in extract_items(payload)
+            if isinstance(item, dict)
+            and str(item.get("tenantNum", "")) == tenant
+            and str(item.get("tenantId", "")).isdigit()
+        }
+        if not tenant_ids:
+            raise ValueError(
+                f"{resource_type} tenant code {tenant!r} could not be resolved to numeric tenantId"
+            )
+        if len(tenant_ids) != 1:
+            raise ValueError(
+                f"{resource_type} tenant code {tenant!r} maps to multiple numeric tenantId values"
+            )
+        return int(next(iter(tenant_ids)))
+
     def _search_raw(
         self,
         *,
@@ -142,8 +308,12 @@ class PlatformResourceService:
         tenant: str | None = None,
         code: str | None = None,
         text: str | None = None,
+        filters: dict[str, Any] | None = None,
         trace_id: str | None = None,
-        last_minutes: int = 60,
+        script_type: str | None = None,
+        log_detail: bool = False,
+        last_minutes: int | None = None,
+        old_total_elements: int | None = None,
         page: int = 0,
         size: int | None = None,
     ) -> tuple[ResourceDefinition, ResourcePage]:
@@ -152,49 +322,58 @@ class PlatformResourceService:
         self._validate_page(page, actual_size)
         if tenant:
             self._settings.assert_tenant(tenant)
-            if (
-                definition.tenant_field == "tenantId"
-                and resource_type != "adapter_event"
-                and not tenant.isdigit()
-            ):
-                raise ValueError(
-                    f"{resource_type} requires numeric tenantId; received tenant {tenant!r}"
-                )
+        if old_total_elements is not None and old_total_elements < 0:
+            raise ValueError("old_total_elements must be zero or greater")
+        if log_detail and definition.kind != "script-log":
+            raise ValueError("log_detail is only supported for script_log")
+
+        native_filters = self._query_filters(
+            definition=definition,
+            resource_type=resource_type,
+            filters=filters,
+            code=code,
+            text=text,
+            trace_id=trace_id,
+            script_type=script_type,
+            last_minutes=last_minutes,
+        )
+        tenant_wire_value = self._query_tenant_value(
+            definition=definition,
+            resource_type=resource_type,
+            tenant=tenant,
+        )
 
         page_params = {"page": page, "size": actual_size, "asyncCountFlag": "DEFAULT"}
-        filters: dict[str, Any] = {}
         if definition.kind == "query":
-            params: dict[str, Any] = dict(page_params)
-            if tenant:
-                params[definition.tenant_param] = tenant
-            if code:
-                params[definition.code_field] = code
-            if text:
-                params[definition.text_param or "text"] = text
+            params: dict[str, Any] = {**page_params, **native_filters}
+            if old_total_elements is not None:
+                params["oldTotalElements"] = old_total_elements
+            if tenant_wire_value is not None:
+                params[definition.tenant_param] = tenant_wire_value
             payload = self._client.get(definition.list_path, params=params)
         elif definition.kind == "rel-table":
-            body: dict[str, Any] = dict(page_params)
-            # adaptor_static_code was verified as a global table whose tenantId is ignored.
-            if tenant and resource_type != "adapter_event":
-                body[definition.tenant_param] = (
-                    int(tenant) if definition.tenant_field == "tenantId" else tenant
-                )
-            if code:
-                body[definition.code_field] = code
-            if text:
-                body["description"] = text
+            body: dict[str, Any] = {**page_params, **native_filters}
+            if old_total_elements is not None:
+                body["oldTotalElements"] = old_total_elements
+            if tenant_wire_value is not None:
+                body[definition.tenant_param] = tenant_wire_value
             payload = self._client.post(definition.list_path, params=page_params, json=body)
         else:
-            body = {"page": page, "lastMinutes": str(last_minutes)}
-            if tenant:
-                body[definition.tenant_param] = tenant
-            if code:
-                body[definition.code_field] = code
-            if text:
-                body["content"] = text
-            if trace_id:
-                body["traceId"] = trace_id
-            payload = self._client.post(definition.list_path, params=page_params, json=body)
+            body = {**native_filters, "page": page}
+            if old_total_elements is not None:
+                body["oldTotalElements"] = old_total_elements
+            if tenant_wire_value is not None:
+                body[definition.tenant_param] = tenant_wire_value
+            path = self.SCRIPT_LOG_DETAIL_PATH if log_detail else definition.list_path
+            if log_detail:
+                required = (definition.tenant_param, "taskCode", "traceId", "scriptType")
+                missing = [field for field in required if body.get(field) in {None, ""}]
+                if missing:
+                    raise ValueError(
+                        "script_log detail requires tenant, code, trace_id, and script_type; "
+                        f"missing wire fields: {', '.join(missing)}"
+                    )
+            payload = self._client.post(path, params=page_params, json=body)
 
         records = [item for item in extract_items(payload) if isinstance(item, dict)]
         warnings: list[str] = []
@@ -205,9 +384,13 @@ class PlatformResourceService:
                 if item.get(definition.tenant_field) not in {None, ""}
             }
         )
-        if tenant and observed and observed != [tenant]:
+        expected_tenant = (
+            str(tenant_wire_value) if tenant_wire_value is not None else None
+        )
+        if expected_tenant and observed and observed != [expected_tenant]:
             warnings.append(
-                f"Requested tenant {tenant!r}, but response contained tenant values {observed!r}"
+                f"Requested tenant {tenant!r} resolved to {expected_tenant!r}, but response "
+                f"contained tenant values {observed!r}"
             )
         if not tenant and len(observed) > 1:
             warnings.append("No tenant filter was supplied; the result spans multiple tenants")
@@ -224,19 +407,18 @@ class PlatformResourceService:
             "total_elements": envelope.get("totalElements"),
             "returned": len(records),
         }
-        filters.update(
-            {
-                "tenant": tenant,
-                "code": code,
-                "text": text,
-                "trace_id": trace_id,
-                "last_minutes": last_minutes if definition.kind == "script-log" else None,
-            }
-        )
         return definition, ResourcePage(
             records=records,
             page=result_page,
-            requested={"page": page, "size": actual_size, "filters": filters},
+            requested={
+                "page": page,
+                "size": actual_size,
+                "tenant": tenant,
+                "tenant_wire_value": tenant_wire_value,
+                "filters": native_filters,
+                "old_total_elements": old_total_elements,
+                "log_detail": log_detail,
+            },
             warnings=warnings,
         )
 
@@ -262,7 +444,7 @@ class PlatformResourceService:
                 value = public.get(field)
                 if isinstance(value, str):
                     public[field] = self._truncate(value, self._settings.text_preview_chars)
-        return sanitize(public)
+        return sanitize(public, preserve_fields=frozenset(definition.source_fields))
 
     def search(self, **kwargs: Any) -> dict[str, Any]:
         definition, outcome = self._search_raw(**kwargs)
@@ -694,6 +876,10 @@ class PlatformResourceService:
             raise ValueError(
                 f"Resource {resource_type!r} does not support generic Rel-Table writes"
             )
+        if definition.tenant_field == "tenantId" and not tenant.isdigit():
+            raise ValueError(
+                f"{resource_type} writes require numeric tenantId; received tenant {tenant!r}"
+            )
         return definition
 
     @staticmethod
@@ -796,12 +982,22 @@ class PlatformResourceService:
             raise ValueError(
                 "Secret fields cannot pass through model context: " + ", ".join(secret_fields)
             )
+        self._validate_source_fields(definition, record)
         code = record.get(definition.code_field)
         if code in {None, ""}:
             raise ValueError(f"Create record must contain {definition.code_field!r}")
         self._validate_creation_fields(definition, record)
         self._encode_resource_text_fields(definition, record, default_content=True)
         self._with_tenant(definition, tenant, record)
+
+    @staticmethod
+    def _validate_source_fields(
+        definition: ResourceDefinition, record: dict[str, Any]
+    ) -> None:
+        for field in definition.source_fields:
+            value = record.get(field)
+            if value is not None:
+                validate_source_integrity(value)
 
     def validate_create(
         self,
@@ -895,6 +1091,7 @@ class PlatformResourceService:
         )
         if blocked:
             raise ValueError(f"Changes contain protected or secret fields: {', '.join(blocked)}")
+        self._validate_source_fields(definition, changes)
         _, current, _ = self._get_raw(resource_type=resource_type, tenant=tenant, code=code)
         actual_version = current.get("objectVersionNumber")
         if not versions_equal(expected_version, actual_version):
