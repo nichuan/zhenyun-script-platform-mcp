@@ -67,9 +67,7 @@ class BrowserAuthenticator:
             return self._login_sync(username=username, password=password)
 
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="script-platform-sso") as pool:
-            return pool.submit(
-                self._login_sync, username=username, password=password
-            ).result()
+            return pool.submit(self._login_sync, username=username, password=password).result()
 
     def _login_sync(self, *, username: str, password: str | None) -> dict[str, Any]:
         try:

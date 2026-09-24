@@ -19,9 +19,10 @@ def test_configuration_root_follows_discovered_dotenv_not_cwd(monkeypatch, tmp_p
 
     monkeypatch.setattr(config, "_CONFIG_ROOT", root)
     monkeypatch.setenv("SCRIPT_PLATFORM_TOKEN_FILE", ".auth/token.json")
-    assert config._configured_path("SCRIPT_PLATFORM_TOKEN_FILE") == (
-        project / ".auth/token.json"
-    ).resolve()
+    assert (
+        config._configured_path("SCRIPT_PLATFORM_TOKEN_FILE")
+        == (project / ".auth/token.json").resolve()
+    )
     assert config._resolve_config_dir(".auth", base=project) == (project / ".auth").resolve()
 
 

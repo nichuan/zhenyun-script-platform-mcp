@@ -1,11 +1,13 @@
+import threading
 from copy import deepcopy
 
 import pytest
 
 from zhenyun_script_platform_mcp.codec import decode_platform_text, encode_platform_text
 from zhenyun_script_platform_mcp.config import Settings
-from zhenyun_script_platform_mcp.exceptions import VersionConflictError
-from zhenyun_script_platform_mcp.services.platform import PlatformResourceService
+from zhenyun_script_platform_mcp.exceptions import ScriptPlatformError, VersionConflictError
+from zhenyun_script_platform_mcp.resources import REQUIREMENT_RESOURCE_TYPES, resource_definition
+from zhenyun_script_platform_mcp.services.platform import PlatformResourceService, ResourcePage
 
 
 class PlatformClient:
@@ -248,6 +250,55 @@ def test_requirement_artifact_search_rejects_non_requirement_text():
             requirement_code="search anything"
         )
     assert client.events == []
+
+
+def test_requirement_artifact_search_runs_independent_resources_concurrently(monkeypatch):
+    service = PlatformResourceService(RequirementSearchClient(), settings())
+    resource_types = list(REQUIREMENT_RESOURCE_TYPES[:3])
+    barrier = threading.Barrier(3)
+
+    def fake_search_raw(*, resource_type, **_kwargs):
+        barrier.wait(timeout=2)
+        return resource_definition(resource_type), ResourcePage(
+            records=[],
+            page={"returned": 0, "size": 100, "total_elements": 0},
+            requested={},
+            warnings=[],
+        )
+
+    monkeypatch.setattr(service, "_search_raw", fake_search_raw)
+    result = service.search_requirement_artifacts(
+        requirement_code="CRO-4585",
+        resource_types=resource_types,
+    )
+
+    assert result["complete"] is True
+    assert [scan["resource_type"] for scan in result["scans"]] == resource_types
+
+
+def test_requirement_artifact_search_preserves_partial_failures(monkeypatch):
+    service = PlatformResourceService(RequirementSearchClient(), settings())
+    resource_types = list(REQUIREMENT_RESOURCE_TYPES[:2])
+
+    def fake_search_raw(*, resource_type, **_kwargs):
+        if resource_type == resource_types[0]:
+            raise ScriptPlatformError("temporary failure")
+        return resource_definition(resource_type), ResourcePage(
+            records=[],
+            page={"returned": 0, "size": 100, "total_elements": 0},
+            requested={},
+            warnings=[],
+        )
+
+    monkeypatch.setattr(service, "_search_raw", fake_search_raw)
+    result = service.search_requirement_artifacts(
+        requirement_code="CRO-4585",
+        resource_types=resource_types,
+    )
+
+    assert result["complete"] is False
+    assert result["scans"][0]["complete"] is False
+    assert result["scans"][1]["complete"] is True
 
 
 def test_definition_is_locally_parsed_without_mapping_blob():

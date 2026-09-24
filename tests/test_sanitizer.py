@@ -32,17 +32,19 @@ def test_free_text_redaction_for_logs_and_errors():
 
 def test_camel_case_and_generic_secret_keys_are_redacted():
     """回归：camelCase / 通用秘密键此前漏脱敏（H3）。"""
-    cleaned = sanitize({
-        "accessToken": "a",
-        "refreshToken": "b",
-        "clientSecret": "c",
-        "apiKey": "d",
-        "userToken": "e",
-        "sessionId": "f",
-        "token": "g",
-        "secret": "h",
-        "keep": "visible",
-    })
+    cleaned = sanitize(
+        {
+            "accessToken": "a",
+            "refreshToken": "b",
+            "clientSecret": "c",
+            "apiKey": "d",
+            "userToken": "e",
+            "sessionId": "f",
+            "token": "g",
+            "secret": "h",
+            "keep": "visible",
+        }
+    )
     for key in (
         "accessToken",
         "refreshToken",
@@ -59,10 +61,12 @@ def test_camel_case_and_generic_secret_keys_are_redacted():
 
 def test_embedded_credentials_in_string_values_are_redacted():
     """回归：sanitize() 此前不递归扫描字符串值（H3）。"""
-    cleaned = sanitize({
-        "msg": "call failed: Authorization: Bearer abc.def.ghi",
-        "detail": "upstream returned access_token=xyz789 for tenant",
-    })
+    cleaned = sanitize(
+        {
+            "msg": "call failed: Authorization: Bearer abc.def.ghi",
+            "detail": "upstream returned access_token=xyz789 for tenant",
+        }
+    )
     assert "abc.def.ghi" not in cleaned["msg"]
     assert "xyz789" not in cleaned["detail"]
     assert REDACTED in cleaned["msg"]
@@ -87,7 +91,7 @@ def test_protocol_confirmation_token_is_not_redacted():
         "headers:{Authorization:token}",
         'headers:{"Authorization":"Bearer " + token}',
         'const result = {"token":resp.id, "accessToken":appStore.token};',
-        '// Authorization is assigned by the runtime\nreturn input;',
+        "// Authorization is assigned by the runtime\nreturn input;",
         'headers:{Authorization:"Bearer eyJhbGciOiJIUzI1NiJ9.literal"}',
         "const 中文 = true;\r\n\treturn 中文;",
     ],

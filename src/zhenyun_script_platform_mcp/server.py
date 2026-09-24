@@ -85,9 +85,7 @@ def _serialize(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
-def _invoke(
-    action: Callable[[], Any], *, preserve_fields: frozenset[str] = frozenset()
-) -> str:
+def _invoke(action: Callable[[], Any], *, preserve_fields: frozenset[str] = frozenset()) -> str:
     try:
         result = sanitize(action(), preserve_fields=preserve_fields)
         if isinstance(result, dict):

@@ -206,7 +206,9 @@ def test_environment_credentials_take_priority_over_files_and_keychain(tmp_path,
     monkeypatch.setattr(
         provider,
         "_password_from_keychain",
-        lambda _username: pytest.fail("Keychain must not be consulted for complete env credentials"),
+        lambda _username: pytest.fail(
+            "Keychain must not be consulted for complete env credentials"
+        ),
     )
 
     assert provider._read_credentials() == ("env-user", "env-password")
@@ -220,7 +222,9 @@ def test_missing_environment_password_falls_back_to_keychain(monkeypatch):
             sso_username="env-user",
         )
     )
-    monkeypatch.setattr(provider, "_password_from_keychain", lambda username: f"keychain-{username}")
+    monkeypatch.setattr(
+        provider, "_password_from_keychain", lambda username: f"keychain-{username}"
+    )
 
     assert provider._read_credentials() == ("env-user", "keychain-env-user")
     provider.close()

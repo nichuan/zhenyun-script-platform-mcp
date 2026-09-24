@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
@@ -73,9 +74,7 @@ class PlatformResourceService:
     TENANT_LOV_PATH = "/hpfm/v1/lovs/sql/data"
     TENANT_LOV_CODE = "HPFM.TENANT_PAGING"
     _LOG_MINUTES: ClassVar[frozenset[int]] = frozenset({0, 15, 30, 60, 120})
-    _LOG_TYPES: ClassVar[frozenset[str]] = frozenset(
-        {"ADAPTOR", "SCRIPT_LIB", "REL_ACTION"}
-    )
+    _LOG_TYPES: ClassVar[frozenset[str]] = frozenset({"ADAPTOR", "SCRIPT_LIB", "REL_ACTION"})
     _PROTECTED_FIELDS: ClassVar[frozenset[str]] = frozenset(
         {
             "id",
@@ -146,15 +145,11 @@ class PlatformResourceService:
             raise ValueError(f"size must be between 1 and {self._settings.max_page_size}")
 
     @staticmethod
-    def _put_filter(
-        result: dict[str, Any], field: str, value: Any, *, source: str
-    ) -> None:
+    def _put_filter(result: dict[str, Any], field: str, value: Any, *, source: str) -> None:
         if value is None or value == "":
             return
         if field in result and result[field] != value:
-            raise ValueError(
-                f"Query field {field!r} conflicts between filters and {source}"
-            )
+            raise ValueError(f"Query field {field!r} conflicts between filters and {source}")
         result[field] = value
 
     def _query_filters(
@@ -179,9 +174,7 @@ class PlatformResourceService:
         if any(not isinstance(key, str) for key in native):
             raise TypeError("filters keys must be strings")
         non_scalar = sorted(
-            key
-            for key, value in native.items()
-            if not isinstance(value, (str, int, float, bool))
+            key for key, value in native.items() if not isinstance(value, (str, int, float, bool))
         )
         if non_scalar:
             raise TypeError(
@@ -211,9 +204,7 @@ class PlatformResourceService:
                 if isinstance(value, bool):
                     native[field] = "true" if value else "false"
                 elif value not in {"true", "false", "1", "0"}:
-                    raise ValueError(
-                        f"Query field {field!r} must be true/false/1/0 or a boolean"
-                    )
+                    raise ValueError(f"Query field {field!r} must be true/false/1/0 or a boolean")
 
         self._put_filter(native, definition.code_field, code, source="code")
         if text is not None and text != "":
@@ -236,13 +227,9 @@ class PlatformResourceService:
         self._put_filter(native, "traceId", trace_id, source="trace_id")
         self._put_filter(native, "scriptType", script_type, source="script_type")
         if "scriptType" in native and native["scriptType"] not in self._LOG_TYPES:
-            raise ValueError(
-                "scriptType must be one of ADAPTOR, SCRIPT_LIB, or REL_ACTION"
-            )
+            raise ValueError("scriptType must be one of ADAPTOR, SCRIPT_LIB, or REL_ACTION")
 
-        configured_minutes = native.get(
-            "lastMinutes", 60 if last_minutes is None else last_minutes
-        )
+        configured_minutes = native.get("lastMinutes", 60 if last_minutes is None else last_minutes)
         try:
             parsed_minutes = int(configured_minutes)
         except (TypeError, ValueError) as exc:
@@ -254,9 +241,7 @@ class PlatformResourceService:
             and "lastMinutes" in native
             and int(native["lastMinutes"]) != last_minutes
         ):
-            raise ValueError(
-                "Query field 'lastMinutes' conflicts between filters and last_minutes"
-            )
+            raise ValueError("Query field 'lastMinutes' conflicts between filters and last_minutes")
         native["lastMinutes"] = str(parsed_minutes)
         return native
 
@@ -384,9 +369,7 @@ class PlatformResourceService:
                 if item.get(definition.tenant_field) not in {None, ""}
             }
         )
-        expected_tenant = (
-            str(tenant_wire_value) if tenant_wire_value is not None else None
-        )
+        expected_tenant = str(tenant_wire_value) if tenant_wire_value is not None else None
         if expected_tenant and observed and observed != [expected_tenant]:
             warnings.append(
                 f"Requested tenant {tenant!r} resolved to {expected_tenant!r}, but response "
@@ -513,15 +496,25 @@ class PlatformResourceService:
         scans: list[dict[str, Any]] = []
         warnings: list[str] = []
         complete = True
-        for resource_type in selected_types:
-            try:
-                definition, outcome = self._search_raw(
+        # Every resource search is read-only and independent. Submit them together,
+        # then consume in requested order so the response remains deterministic.
+        with ThreadPoolExecutor(
+            max_workers=min(len(selected_types), 4), thread_name_prefix="requirement-search"
+        ) as executor:
+            futures = {
+                resource_type: executor.submit(
+                    self._search_raw,
                     resource_type=resource_type,
                     tenant=tenant,
                     text=normalized_code,
                     page=0,
                     size=actual_size,
                 )
+                for resource_type in selected_types
+            }
+        for resource_type in selected_types:
+            try:
+                definition, outcome = futures[resource_type].result()
                 matched_records = [
                     record
                     for record in outcome.records
@@ -991,9 +984,7 @@ class PlatformResourceService:
         self._with_tenant(definition, tenant, record)
 
     @staticmethod
-    def _validate_source_fields(
-        definition: ResourceDefinition, record: dict[str, Any]
-    ) -> None:
+    def _validate_source_fields(definition: ResourceDefinition, record: dict[str, Any]) -> None:
         for field in definition.source_fields:
             value = record.get(field)
             if value is not None:

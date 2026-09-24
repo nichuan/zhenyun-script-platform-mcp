@@ -136,9 +136,7 @@ class AuthProvider:
         refresh_expires_at = _timestamp(
             raw.get("refresh_expires_at") or raw.get("refreshExpiresAt")
         )
-        refresh_expires_in = _duration(
-            raw.get("refresh_expires_in") or raw.get("refreshExpiresIn")
-        )
+        refresh_expires_in = _duration(raw.get("refresh_expires_in") or raw.get("refreshExpiresIn"))
         if (
             refresh_expires_at is None
             and obtained_ts is not None
