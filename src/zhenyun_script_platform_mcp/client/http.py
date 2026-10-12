@@ -16,8 +16,37 @@ from ..exceptions import (
     ScriptPlatformError,
     VersionConflictError,
 )
+from ..resources import RESOURCES
 from ..sanitizer import sanitize
 from .auth import AuthProvider
+
+_READ_RETRY_GET_PATHS = frozenset(
+    {
+        "/sada/v1/adaptor-task-headers",
+        "/sada/v1/adaptor-script/search",
+        "/sada/v1/marmot-admin/is-admin",
+        "/hpfm/v1/lovs/sql/data",
+        "/marmot/v1/0/marmot-api-rewrite/api/point/list",
+        *(
+            f"/sada/v1/rel-table-definitions/find/{item.platform_id}"
+            for item in RESOURCES.values()
+            if item.definition_readable
+        ),
+    }
+)
+_READ_RETRY_POST_PATHS = frozenset(
+    {
+        *(item.list_path for item in RESOURCES.values() if item.kind == "rel-table"),
+        "/sada/v1/script-log-records/query",
+        "/sada/v1/script-log-records/query-by-id",
+    }
+)
+
+
+def _can_retry_after_auth_rejection(method: str, path: str) -> bool:
+    return (method == "GET" and path in _READ_RETRY_GET_PATHS) or (
+        method == "POST" and path in _READ_RETRY_POST_PATHS
+    )
 
 
 class ScriptPlatformClient:
@@ -87,6 +116,7 @@ class ScriptPlatformClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
     ) -> Any:
+        safe_to_retry = _can_retry_after_auth_rejection(method, path)
         for attempt in range(2):
             request_id = uuid.uuid4().hex
             headers = {"Accept": "application/json", "Content-Type": "application/json"}
@@ -109,14 +139,20 @@ class ScriptPlatformClient:
             except httpx.TimeoutException as exc:
                 raise ScriptPlatformError(
                     f"Script Platform request timed out after {self.settings.timeout:g}s",
-                    details={"request_id": request_id},
-                    retryable=True,
+                    details={
+                        "request_id": request_id,
+                        "outcome": "read_failed" if safe_to_retry else "unknown",
+                    },
+                    retryable=safe_to_retry,
                 ) from exc
             except httpx.HTTPError as exc:
                 raise ScriptPlatformError(
                     f"Script Platform request failed: {type(exc).__name__}",
-                    details={"request_id": request_id},
-                    retryable=True,
+                    details={
+                        "request_id": request_id,
+                        "outcome": "read_failed" if safe_to_retry else "unknown",
+                    },
+                    retryable=safe_to_retry,
                 ) from exc
 
             request_id = response.headers.get("X-Request-ID", request_id)
@@ -132,10 +168,15 @@ class ScriptPlatformClient:
                         details={"request_id": request_id},
                     )
                 payload = self._decode_response(response)
-            except AuthenticationError:
+            except AuthenticationError as exc:
                 if attempt == 0:
                     self._auth.refresh_after_rejection(rejected_token)
-                    continue
+                    if safe_to_retry:
+                        continue
+                    raise AuthenticationError(
+                        "Access token was rejected and refreshed; the write or execution was not replayed. Inspect its state before retrying.",
+                        details={"request_id": request_id, "outcome": "unknown"},
+                    ) from exc
                 raise
 
             if response.status_code == 404:

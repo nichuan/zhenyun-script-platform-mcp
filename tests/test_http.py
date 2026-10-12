@@ -90,9 +90,74 @@ def test_401_refreshes_once_and_retries_with_new_token():
         auth_provider=auth,
         transport=httpx.MockTransport(handler),
     )
-    assert client.get("/status") == {"ok": True}
+    assert client.get("/sada/v1/marmot-admin/is-admin") == {"ok": True}
     assert seen == ["Bearer old", "Bearer new"]
     assert auth.refreshes == 1
+    client.close()
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("PUT", "/sada/v1/rel-table-records/marmot_script_library"),
+        ("POST", "/sada/v1/adaptor-task-headers/adaptor-save"),
+        ("GET", "/sada/v1/adaptor-task-headers/toggle-cache"),
+    ],
+)
+def test_401_refreshes_but_never_replays_mutation(method, path):
+    requests = []
+    auth = FakeAuth()
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(401, json={"message": "expired"})
+
+    client = ScriptPlatformClient(
+        Settings(base_url="https://gateway.dev.example.com"),
+        auth_provider=auth,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(AuthenticationError, match="not replayed") as caught:
+        client.request(method, path, json={"id": 1})
+    assert len(requests) == 1
+    assert auth.refreshes == 1
+    assert caught.value.details["outcome"] == "unknown"
+    client.close()
+
+
+def test_401_retries_registered_post_page_read_only():
+    auth = FakeAuth()
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(401 if len(requests) == 1 else 200, json={"content": []})
+
+    client = ScriptPlatformClient(
+        Settings(base_url="https://gateway.dev.example.com"),
+        auth_provider=auth,
+        transport=httpx.MockTransport(handler),
+    )
+    assert client.post("/sada/v1/rel-table-records/marmot_script_library/page", json={}) == {
+        "content": []
+    }
+    assert len(requests) == 2
+    client.close()
+
+
+def test_write_transport_timeout_is_unknown_and_not_marked_retryable():
+    def handler(request):
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    client = ScriptPlatformClient(
+        Settings(base_url="https://gateway.dev.example.com"),
+        auth_provider=FakeAuth(),
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(ScriptPlatformError) as caught:
+        client.post("/sada/v1/adaptor-task-headers/adaptor-save", json={"id": 1})
+    assert caught.value.retryable is False
+    assert caught.value.details["outcome"] == "unknown"
     client.close()
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -10,8 +11,14 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
 
-from ..codec import encode_platform_text
+from ..codec import (
+    assert_plain_script_content,
+    decode_platform_text,
+    decode_script_content,
+    encode_platform_text,
+)
 from ..config import Settings
+from ..description_note import create_description, update_description
 from ..exceptions import (
     NotFoundError,
     SaveVerificationError,
@@ -75,6 +82,9 @@ class PlatformResourceService:
     TENANT_LOV_CODE = "HPFM.TENANT_PAGING"
     _LOG_MINUTES: ClassVar[frozenset[int]] = frozenset({0, 15, 30, 60, 120})
     _LOG_TYPES: ClassVar[frozenset[str]] = frozenset({"ADAPTOR", "SCRIPT_LIB", "REL_ACTION"})
+    _DESCRIPTION_NOTE_RESOURCES: ClassVar[frozenset[str]] = frozenset(
+        {"independent_script", "code_block", "query_block", "constant"}
+    )
     _PROTECTED_FIELDS: ClassVar[frozenset[str]] = frozenset(
         {
             "id",
@@ -124,6 +134,7 @@ class PlatformResourceService:
                 ],
                 "table_action": ["registered-action execution"],
                 "api_mount": ["list points", "create/save api_rewrite"],
+                "scheduled_script": ["read-only exact pair inspection"],
             },
             "blocked": {
                 "import_start": "HZERO import UI; reference account had no permission",
@@ -862,6 +873,94 @@ class PlatformResourceService:
             "field_mapping": {"classBeanName": "api_rewrite.beanName"},
         }
 
+    def _read_exact_for_inspection(
+        self, *, resource_type: str, tenant: str, code: str
+    ) -> dict[str, Any] | None:
+        definition, outcome = self._search_raw(
+            resource_type=resource_type,
+            tenant=tenant,
+            code=code,
+            page=0,
+            size=self._settings.max_page_size,
+        )
+        if not self._single_page_complete(outcome.page) or outcome.warnings:
+            raise VersionConflictError(
+                f"{resource_type} inspection did not return a complete tenant-scoped page"
+            )
+        matches = [
+            record
+            for record in outcome.records
+            if str(record.get(definition.code_field, "")) == code
+            and str(record.get(definition.tenant_field, "")) == tenant
+        ]
+        if len(matches) > 1:
+            raise VersionConflictError(f"{resource_type} inspection found duplicate exact records")
+        return matches[0] if matches else None
+
+    def inspect_scheduled_script(
+        self, *, tenant: str, script_code: str, job_code: str
+    ) -> dict[str, Any]:
+        """Read an exact script/scheduler pair without changing either object."""
+        self._settings.assert_tenant(tenant)
+        if not script_code or not job_code:
+            raise ValueError("script_code and job_code are required for exact inspection")
+        numeric_tenant = self._query_tenant_value(
+            definition=RESOURCES["scheduler"], resource_type="scheduler", tenant=tenant
+        )
+        script = self._read_exact_for_inspection(
+            resource_type="independent_script", tenant=tenant, code=script_code
+        )
+        scheduler = self._read_exact_for_inspection(
+            resource_type="scheduler", tenant=str(numeric_tenant), code=job_code
+        )
+        source = (
+            decode_script_content(script["content"])
+            if script and isinstance(script.get("content"), str)
+            else None
+        )
+        linked = bool(
+            script
+            and scheduler
+            and script.get("quickType") == "schedule"
+            and scheduler.get("scriptCode") == script_code
+        )
+        state = "unknown"
+        if scheduler:
+            if scheduler.get("terminated") == "1":
+                state = "terminated"
+            elif scheduler.get("jobId") and scheduler.get("jobStatus") == "正常":
+                state = "active"
+            elif scheduler.get("jobId") and scheduler.get("jobStatus") == "暂停":
+                state = "paused"
+        return {
+            "tenant": tenant,
+            "tenant_id": numeric_tenant,
+            "script": {
+                "exists": script is not None,
+                "code": script_code,
+                "id": script.get("id") if script else None,
+                "version": script.get("objectVersionNumber") if script else None,
+                "quick_type": script.get("quickType") if script else None,
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest()
+                if source is not None
+                else None,
+            },
+            "scheduler": {
+                "exists": scheduler is not None,
+                "code": job_code,
+                "id": scheduler.get("id") if scheduler else None,
+                "version": scheduler.get("objectVersionNumber") if scheduler else None,
+                "script_code": scheduler.get("scriptCode") if scheduler else None,
+                "state": state,
+                "job_cron": scheduler.get("jobCron") if scheduler else None,
+                "job_cron_enum": scheduler.get("jobCronEnum") if scheduler else None,
+            },
+            "linked_to_schedule_script": linked,
+            "runtime_execution_verified": False,
+            "local_replay_protection": "not_implemented",
+            "note": "Read-only configuration inspection does not prove a past write has finished or that a schedule has run.",
+        }
+
     def _assert_write_resource(self, resource_type: str, tenant: str) -> ResourceDefinition:
         self._settings.assert_tenant(tenant)
         definition = resource_definition(resource_type)
@@ -907,6 +1006,7 @@ class PlatformResourceService:
                 content = ""
             if not isinstance(content, str):
                 raise ValueError("independent_script content must be plain text")
+            assert_plain_script_content(content)
             result["content"] = encode_platform_text(content)
 
         if "contentInput" in result and result["contentInput"] is not None:
@@ -921,13 +1021,20 @@ class PlatformResourceService:
         if definition.platform_id != "marmot_script_library":
             return []
         quick_type = str(record.get("quickType", "")).strip().lower()
+        if quick_type == "schedule":
+            return [
+                (
+                    "Only the independent script was created and verified. Scheduler linkage, "
+                    "frequency, and runtime state were not checked; maintain the scheduler "
+                    "separately only when the user authorized a scheduling workflow."
+                )
+            ]
         related = {
             "api": "api_publish",
             "api_pre": "api_publish",
             "api_post": "api_publish",
             "api_publish": "api_publish",
             "consumer": "queue_consumer",
-            "schedule": "scheduler",
         }.get(quick_type)
         if not related:
             return []
@@ -941,6 +1048,15 @@ class PlatformResourceService:
 
     @staticmethod
     def _validate_creation_fields(definition: ResourceDefinition, record: dict[str, Any]) -> None:
+        if definition.platform_id == "sada_adaptor_query_block" and record.get("mustRead") not in {
+            "0",
+            "1",
+        }:
+            raise ValueError('query_block create requires mustRead="0" or "1"')
+        if definition.platform_id == "marmot_script_library" and (
+            not isinstance(record.get("resourceLevel"), str) or not record["resourceLevel"].strip()
+        ):
+            raise ValueError("independent_script resourceLevel must be a non-empty lookup value")
         if definition.platform_id != "marmot_script_library":
             return
         missing = [
@@ -962,26 +1078,41 @@ class PlatformResourceService:
                 "independent_script description must start with a demand code such as cdp-00000"
             )
 
-    def _validate_create_request(
+    def _prepare_create_record(
         self,
         definition: ResourceDefinition,
         tenant: str,
         record: dict[str, Any],
-    ) -> None:
-        if "id" in record or "_token" in record:
+        description_note: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(record, dict):
+            raise TypeError("record must be an object")
+        prepared = deepcopy(record)
+        if description_note is not None:
+            if definition.platform_id not in {
+                RESOURCES[name].platform_id for name in self._DESCRIPTION_NOTE_RESOURCES
+            }:
+                raise ValueError("description_note is not supported for this resource")
+            if "description" in prepared:
+                raise ValueError("description_note and record.description are mutually exclusive")
+            prepared["description"] = create_description(description_note)
+        if definition.platform_id == "marmot_script_library":
+            prepared.setdefault("resourceLevel", "MEDIUM")
+        if "id" in prepared or "_token" in prepared:
             raise ValueError("Create record must not contain id or _token")
-        secret_fields = sorted(set(record) & set(definition.mask_fields))
+        secret_fields = sorted(set(prepared) & set(definition.mask_fields))
         if secret_fields:
             raise ValueError(
                 "Secret fields cannot pass through model context: " + ", ".join(secret_fields)
             )
-        self._validate_source_fields(definition, record)
-        code = record.get(definition.code_field)
+        self._validate_source_fields(definition, prepared)
+        code = prepared.get(definition.code_field)
         if code in {None, ""}:
             raise ValueError(f"Create record must contain {definition.code_field!r}")
-        self._validate_creation_fields(definition, record)
-        self._encode_resource_text_fields(definition, record, default_content=True)
-        self._with_tenant(definition, tenant, record)
+        self._validate_creation_fields(definition, prepared)
+        self._encode_resource_text_fields(definition, prepared, default_content=True)
+        self._with_tenant(definition, tenant, prepared)
+        return prepared
 
     @staticmethod
     def _validate_source_fields(definition: ResourceDefinition, record: dict[str, Any]) -> None:
@@ -996,10 +1127,33 @@ class PlatformResourceService:
         resource_type: str,
         tenant: str,
         record: dict[str, Any],
-    ) -> None:
+        description_note: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Validate a create request without contacting or changing the platform."""
         definition = self._assert_write_resource(resource_type, tenant)
-        self._validate_create_request(definition, tenant, record)
+        return self._prepare_create_record(definition, tenant, record, description_note)
+
+    def preview_save(
+        self,
+        *,
+        resource_type: str,
+        tenant: str,
+        code: str,
+        changes: dict[str, Any],
+        expected_version: str | int,
+        description_note: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._assert_write_resource(resource_type, tenant)
+        if resource_type not in self._DESCRIPTION_NOTE_RESOURCES:
+            raise ValueError("description_note is not supported for this resource")
+        if "description" in changes:
+            raise ValueError("description_note and changes.description are mutually exclusive")
+        _, current, _ = self._get_raw(resource_type=resource_type, tenant=tenant, code=code)
+        if not versions_equal(expected_version, current.get("objectVersionNumber")):
+            raise VersionConflictError(
+                "Resource changed after it was loaded. Reload before saving."
+            )
+        return {"description": update_description(current.get("description"), description_note)}
 
     def _get_created_with_retry(
         self,
@@ -1028,11 +1182,12 @@ class PlatformResourceService:
         resource_type: str,
         tenant: str,
         record: dict[str, Any],
+        description_note: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         definition = self._assert_write_resource(resource_type, tenant)
-        self._validate_create_request(definition, tenant, record)
-        code = record[definition.code_field]
-        payload = self._encode_resource_text_fields(definition, record, default_content=True)
+        prepared = self._prepare_create_record(definition, tenant, record, description_note)
+        code = prepared[definition.code_field]
+        payload = self._encode_resource_text_fields(definition, prepared, default_content=True)
         payload = self._with_tenant(definition, tenant, payload)
         if definition.tenant_field != "tenantId":
             payload.setdefault("tenantId", 0)
@@ -1053,6 +1208,29 @@ class PlatformResourceService:
                     "verify_attempts": self._settings.create_verify_attempts,
                 },
             ) from exc
+        checked_fields = {"description", "resourceLevel", "mustRead"} & set(prepared)
+        mismatches = {
+            field: {"requested": prepared[field], "actual": created.get(field)}
+            for field in checked_fields
+            if created.get(field) != prepared[field]
+        }
+        if definition.platform_id == "marmot_script_library":
+            for field in ("content", "contentInput"):
+                actual = created.get(field)
+                expected = payload.get(field)
+                if field == "content" and isinstance(actual, str):
+                    actual = decode_script_content(actual)
+                    expected = prepared.get("content", "")
+                elif field in payload:
+                    actual = decode_platform_text(actual)
+                    expected = decode_platform_text(expected)
+                if field in payload and actual != expected:
+                    mismatches[field] = {"requested": "<source>", "actual": "<different source>"}
+        if mismatches:
+            raise SaveVerificationError(
+                "Create returned successfully, but reloaded fields did not match",
+                details={"created": True, "verified": False, "mismatches": sanitize(mismatches)},
+            )
         result = {
             "created": True,
             "verified": True,
@@ -1060,7 +1238,7 @@ class PlatformResourceService:
             "code": str(code),
             "record": self._public_record(definition, created, truncate=False),
         }
-        warnings = self._creation_warnings(definition, record)
+        warnings = self._creation_warnings(definition, prepared)
         if warnings:
             result["warnings"] = warnings
         return result
@@ -1073,10 +1251,16 @@ class PlatformResourceService:
         code: str,
         changes: dict[str, Any],
         expected_version: str | int,
+        description_note: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         definition = self._assert_write_resource(resource_type, tenant)
-        if not changes:
+        if not changes and description_note is None:
             raise ValueError("changes must not be empty")
+        if description_note is not None:
+            if resource_type not in self._DESCRIPTION_NOTE_RESOURCES:
+                raise ValueError("description_note is not supported for this resource")
+            if "description" in changes:
+                raise ValueError("description_note and changes.description are mutually exclusive")
         blocked = sorted(
             (set(changes) & self._PROTECTED_FIELDS) | (set(changes) & set(definition.mask_fields))
         )
@@ -1090,7 +1274,35 @@ class PlatformResourceService:
                 "Resource changed after it was loaded. Reload before saving.",
                 details={"expected_version": expected_version, "actual_version": actual_version},
             )
-        encoded_changes = self._encode_resource_text_fields(definition, changes)
+        effective_changes = deepcopy(changes)
+        if description_note is not None:
+            effective_changes["description"] = update_description(
+                current.get("description"), description_note
+            )
+            if not changes and effective_changes["description"] == current.get("description"):
+                return {
+                    "changed": False,
+                    "verified": True,
+                    "resource_type": resource_type,
+                    "code": code,
+                    "version": actual_version,
+                }
+        if (
+            definition.platform_id == "sada_adaptor_query_block"
+            and "mustRead" in effective_changes
+            and effective_changes["mustRead"] not in {"0", "1"}
+        ):
+            raise ValueError('query_block mustRead must be "0" or "1"')
+        if (
+            definition.platform_id == "marmot_script_library"
+            and "resourceLevel" in effective_changes
+            and (
+                not isinstance(effective_changes["resourceLevel"], str)
+                or not effective_changes["resourceLevel"].strip()
+            )
+        ):
+            raise ValueError("independent_script resourceLevel must be a non-empty lookup value")
+        encoded_changes = self._encode_resource_text_fields(definition, effective_changes)
         payload = self._with_tenant(definition, tenant, {**current, **encoded_changes})
         payload["updateScenario"] = "update"
         self._client.put(definition.record_path, json=payload)
@@ -1098,22 +1310,37 @@ class PlatformResourceService:
         mismatches = {
             key: {"requested": value, "actual": after.get(key)}
             for key, value in encoded_changes.items()
-            if after.get(key) != value
+            if (
+                (
+                    decode_script_content(after.get(key)) != effective_changes[key]
+                    if key == "content"
+                    else decode_platform_text(after.get(key)) != decode_platform_text(value)
+                )
+                if definition.platform_id == "marmot_script_library"
+                and key in {"content", "contentInput"}
+                else after.get(key) != value
+            )
         }
         if mismatches:
             raise SaveVerificationError(
                 "Save returned successfully, but reloaded fields did not match",
                 details={"saved": True, "verified": False, "mismatches": sanitize(mismatches)},
             )
-        return {
+        result = {
             "saved": True,
             "verified": True,
             "resource_type": resource_type,
             "code": code,
             "old_version": actual_version,
             "new_version": after.get("objectVersionNumber"),
-            "changed_fields": sorted(changes),
+            "changed_fields": sorted(effective_changes),
         }
+        if resource_type == "query_block":
+            result["runtime_verified"] = False
+            result["runtime_note"] = (
+                "Configuration persisted; script runtime cache and execution were not verified"
+            )
+        return result
 
     def delete(
         self,

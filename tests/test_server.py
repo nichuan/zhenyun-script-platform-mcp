@@ -44,6 +44,7 @@ def test_server_exposes_lifecycle_and_verified_platform_tools():
         "platform_resource_save",
         "platform_resource_delete",
         "platform_table_action",
+        "platform_scheduled_script_inspect",
     }
 
 
@@ -59,6 +60,7 @@ def test_tool_annotations_distinguish_reads_remote_execution_and_writes():
     assert tools["platform_resource_get"].annotations.readOnlyHint is True
     assert tools["platform_requirement_artifacts_search"].annotations.readOnlyHint is True
     assert tools["platform_resource_save"].annotations.destructiveHint is True
+    assert tools["platform_scheduled_script_inspect"].annotations.readOnlyHint is True
     assert tools["platform_table_action"].annotations.destructiveHint is True
     assert {"permission", "module"} <= set(
         tools["independent_script_create"].parameters["required"]

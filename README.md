@@ -36,7 +36,7 @@ JSON。
 | `adapter_extract_input` | 从调用方提供的日志文本中平衡提取 JSON | 否 |
 | `adapter_deploy` | 停用（若需要）、重新读取、保存、校验、恢复或按 `enable` 启用状态 | **是** |
 
-从 WebOps 参考实现吸收的增量能力按现有风格收敛为 16 个工具：
+从 WebOps 参考实现吸收的增量能力按现有风格收敛为 17 个工具：
 
 | 分组 | 工具 | 说明 |
 | --- | --- | --- |
@@ -44,6 +44,7 @@ JSON。
 | 需求资产发现 | `platform_requirement_artifacts_search` | 按需求号聚合搜索 Adapter、Independent、CodeBlock、QueryBlock、API 发布和改写候选；不返回完整源码 |
 | 通用读取 | `platform_resource_search` / `platform_resource_get` | 查询 14 类封闭资源，不接受任意表名或 URL |
 | 元数据 | `platform_definition_get` / `platform_relations_get` / `platform_api_point_list` | 11 类定义可用资源的字段定义、脚本引用关系和 API 挂载点 |
+| 调度核查 | `platform_scheduled_script_inspect` | 按租户编码、脚本编码和调度编码精确只读核查关联、版本、源码哈希与有限状态 |
 | 通用写入 | `platform_resource_create` / `platform_resource_save` / `platform_resource_delete` | 10 类已验证 Rel-Table CRUD；更新/删除强制版本条件 |
 | 表级动作 | `platform_table_action` | 只允许表与 actionId 的已验证组合；调度和连通性测试可能有真实副作用 |
 | Adapter 生命周期 | `adapter_create` / `adapter_update` / `adapter_toggle` / `adapter_delete` | 创建、元数据更新、显式启停和物理删除；源码仍用 `adapter_deploy` |
@@ -60,6 +61,21 @@ JSON。
 `description`、Adapter 全览使用 `text`、OutBound 白名单使用 `remark`；Topic 消费端和调度没有
 已验证的通用文本字段，传入 `text` 会在本地拒绝。调度查询既可传数字 `tenantId`，也可传租户
 编码，后者会通过固定 `HPFM.TENANT_PAGING` LOV 精确解析。
+
+上游 Marmot Ops 1.3～1.5 的可复用契约已同步到本 MCP：
+
+- 独立脚本、CodeBlock、QueryBlock 和 Adapter 可用结构化 `description_note` 新建；常量可用它更新描述，
+  常量新建仍受本 MCP 现有的秘密值保护限制。新建描述只接受
+  `work_item`、`customer_label`、`summary` 生成单条 `cdp-123【项目】摘要`；与原始描述互斥。
+  修改时用 `work_item`、`change_type`、`summary` 在旧描述前增补受管标记，按需求号更新和去重，
+  保留旧自由描述；同需求旧格式无法识别时拒绝自动改写。摘要 60、最终描述 255 字符为 MCP 保守上限。
+- 独立脚本新建默认 `resourceLevel="MEDIUM"`，调用方显式值不覆盖；QueryBlock 新建必须明确
+  `mustRead="0"` 或 `"1"`，保存时也只接受字符串 `0/1`。
+- 独立脚本 `content` 由 MCP 接收明文并编码；明文或历史 Base64 回读统一做语义校验，已编码输入
+  会被本地拒绝。`contentInput` 保留本 MCP 现有的独立编码契约。
+- 认证失效后只重试已登记的只读请求。写入、启停和脚本执行只刷新认证，不自动重发请求。
+- `platform_scheduled_script_inspect` 只读核查脚本与调度配置。当前 MCP 尚无上游 1.5 的双对象
+  持久化收据和复合 `ensure`，因此不能把这项核查当成未知写入的结束证明，也不自动续建调度。
 
 核心原则是 **Debug First, Save Last**。Debug 工具不会保存、停用或启用任何脚本。只有用户
 明确说“保存 / 发布 / 部署 / 更新到 DEV”后才可生成写入计划；计划必须展示给用户，收到后续
@@ -181,7 +197,8 @@ platform_resource_search(
 - `independent_script_create` 以及独立脚本的通用创建都要求调用方提供平台必填的
   `permission`、`module`，并会在首阶段确认前校验编码/需求描述格式，统一编码
   `content`/`contentInput`；`platform_definition_get` 会返回已知平台校验提示。
-- 独立脚本的 `quickType` 可能连带创建或引用 `api_publish`、`queue_consumer`、`scheduler`；
+- 独立脚本的 `quickType` 可能连带创建或引用 `api_publish`、`queue_consumer`。分类为 `schedule`
+  只证明脚本库记录已保存，调度关联、频率和状态仍须单独确认；
   删除前会扫描引用，创建计划和执行结果也会提示检查关系。
 - 常量 `value` 等秘密字段不会返回，也禁止经通用 create/save 穿过模型上下文。
 - `scheduler` 使用数字 `tenantId`；其它多数资源使用租户编码 `tenantNum`。

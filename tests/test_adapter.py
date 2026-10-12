@@ -115,6 +115,43 @@ def test_adapter_metadata_update_preserves_lines(adapter_client, write_settings)
     assert adapter_client.header["adaptorTaskLines"][0]["_status"] == "update"
 
 
+def test_adapter_description_note_previews_and_updates_with_version_guard(
+    adapter_client, write_settings
+):
+    service = AdapterService(adapter_client, write_settings)
+    note = {"work_item": "cdp-185966", "change_type": "fix", "summary": "修复校验"}
+    preview = service.preview_update(
+        tenant_num="SRM-DEMO",
+        task_code="TASK",
+        running_service="srm-source",
+        changes={},
+        expected_header_version=15,
+        description_note=note,
+    )
+    assert preview["description"].startswith("cdp-185966 [修复] 修复校验")
+    result = service.update(
+        tenant_num="SRM-DEMO",
+        task_code="TASK",
+        running_service="srm-source",
+        changes={},
+        expected_header_version=15,
+        description_note=note,
+    )
+    assert result["verified"] is True
+    assert adapter_client.header["description"] == preview["description"]
+    writes = adapter_client.events.count("SAVE")
+    unchanged = service.update(
+        tenant_num="SRM-DEMO",
+        task_code="TASK",
+        running_service="srm-source",
+        changes={},
+        expected_header_version=adapter_client.header["objectVersionNumber"],
+        description_note=note,
+    )
+    assert unchanged["changed"] is False
+    assert adapter_client.events.count("SAVE") == writes
+
+
 def test_adapter_create_builds_required_initial_line(write_settings):
     client = FakeAdapterClient()
     client.present = False

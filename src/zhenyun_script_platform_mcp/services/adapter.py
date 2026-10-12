@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Protocol
 
 from ..codec import decode_platform_text, encode_platform_text, source_hash
 from ..config import Settings
+from ..description_note import create_description, update_description
 from ..exceptions import (
     AdapterStateError,
     AmbiguousLineError,
@@ -257,10 +258,16 @@ class AdapterService:
         tenant_num: str,
         task_code: str,
         running_service: str,
-        description: str = "",
+        description: str | None = None,
         input_entity_code: str = "ANYTHING",
+        description_note: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._settings.assert_tenant(tenant_num)
+        if description_note is not None:
+            if description is not None:
+                raise ValueError("description_note and description are mutually exclusive")
+            description = create_description(description_note)
+        description = description or ""
         try:
             self._get_snapshot(
                 tenant_num=tenant_num,
@@ -307,6 +314,11 @@ class AdapterService:
                 "Adapter create completed, but the new header could not be reloaded",
                 details={"created": True, "verified": False, "cause": type(exc).__name__},
             ) from exc
+        if after.public.description != description:
+            raise SaveVerificationError(
+                "Adapter create returned successfully, but reloaded description did not match",
+                details={"created": True, "verified": False},
+            )
         return {
             "created": True,
             "verified": True,
@@ -325,10 +337,13 @@ class AdapterService:
         running_service: str,
         changes: dict[str, Any],
         expected_header_version: str | int,
+        description_note: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._settings.assert_tenant(tenant_num)
-        if not changes:
+        if not changes and description_note is None:
             raise ValueError("changes must not be empty")
+        if description_note is not None and "description" in changes:
+            raise ValueError("description_note and changes.description are mutually exclusive")
         blocked = sorted(set(changes) - self._MUTABLE_HEADER_FIELDS)
         if blocked:
             raise ValueError(
@@ -349,13 +364,25 @@ class AdapterService:
                     "actual_header_version": before.public.object_version_number,
                 },
             )
+        effective_changes = deepcopy(changes)
+        if description_note is not None:
+            effective_changes["description"] = update_description(
+                before.public.description, description_note
+            )
+            if not changes and effective_changes["description"] == before.public.description:
+                return {
+                    "changed": False,
+                    "verified": True,
+                    "header_version": before.public.object_version_number,
+                    "enabled": before.public.enabled,
+                }
         payload = self._prepare_header_payload(before.raw_header)
-        payload.update(deepcopy(changes))
+        payload.update(effective_changes)
         self._client.post(self.SAVE_ENDPOINT, json=payload)
         after = self._reload(before.public)
         mismatches = {
             key: {"requested": value, "actual": after.raw_header.get(key)}
-            for key, value in changes.items()
+            for key, value in effective_changes.items()
             if after.raw_header.get(key) != value
         }
         if mismatches:
@@ -368,9 +395,32 @@ class AdapterService:
             "verified": True,
             "old_header_version": before.public.object_version_number,
             "new_header_version": after.public.object_version_number,
-            "changed_fields": sorted(changes),
+            "changed_fields": sorted(effective_changes),
             "enabled": after.public.enabled,
         }
+
+    def preview_update(
+        self,
+        *,
+        tenant_num: str,
+        task_code: str,
+        running_service: str,
+        changes: dict[str, Any],
+        expected_header_version: str | int,
+        description_note: dict[str, Any],
+    ) -> dict[str, Any]:
+        if "description" in changes:
+            raise ValueError("description_note and changes.description are mutually exclusive")
+        before = self._get_snapshot(
+            tenant_num=tenant_num,
+            task_code=task_code,
+            running_service=running_service,
+        )
+        if not versions_equal(expected_header_version, before.public.object_version_number):
+            raise VersionConflictError(
+                "Adapter changed after it was loaded. Reload before updating metadata."
+            )
+        return {"description": update_description(before.public.description, description_note)}
 
     def toggle(
         self,

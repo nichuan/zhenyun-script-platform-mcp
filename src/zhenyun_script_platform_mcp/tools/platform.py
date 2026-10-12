@@ -29,6 +29,10 @@ def list_api_points(service: PlatformResourceService, **kwargs: Any) -> dict[str
     return service.api_points(**kwargs)
 
 
+def inspect_scheduled_script(service: PlatformResourceService, **kwargs: Any) -> dict[str, Any]:
+    return service.inspect_scheduled_script(**kwargs)
+
+
 def create_resource(service: PlatformResourceService, **kwargs: Any) -> dict[str, Any]:
     return service.create(**kwargs)
 

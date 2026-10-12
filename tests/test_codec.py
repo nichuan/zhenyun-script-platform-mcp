@@ -4,7 +4,9 @@ import pytest
 
 from zhenyun_script_platform_mcp.codec import (
     PlatformCodecError,
+    assert_plain_script_content,
     decode_platform_text,
+    decode_script_content,
     encode_platform_text,
     source_hash,
 )
@@ -33,3 +35,14 @@ def test_invalid_encoded_text_is_rejected(value):
 
 def test_source_hash_is_stable_sha256():
     assert source_hash("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+
+def test_script_readback_accepts_plain_or_encoded_and_write_rejects_encoded_input():
+    source = "function process(input) { return input; }"
+    encoded = encode_platform_text(source)
+    assert decode_script_content(source) == source
+    assert decode_script_content(encoded) == source
+    assert decode_script_content("abcd") == "abcd"
+    with pytest.raises(PlatformCodecError, match="plain text"):
+        assert_plain_script_content(encoded)
+    assert_plain_script_content(source)

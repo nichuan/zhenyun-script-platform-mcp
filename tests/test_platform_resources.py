@@ -168,6 +168,43 @@ class RequirementSearchClient(PlatformClient):
         }
 
 
+class ScheduledPairClient(PlatformClient):
+    def get(self, path, *, params=None):
+        self.events.append(("GET", path, deepcopy(params), None))
+        if path.endswith("/lovs/sql/data"):
+            return {"content": [{"tenantNum": "SRM-DEMO", "tenantId": 30}]}
+        raise AssertionError(f"unexpected read path: {path}")
+
+    def post(self, path, *, params=None, json=None):
+        self.events.append(("POST", path, deepcopy(params), deepcopy(json)))
+        if path.endswith("marmot_script_library/page"):
+            records = [
+                {
+                    "id": 1,
+                    "code": "SCRIPT_A",
+                    "tenantNum": "SRM-DEMO",
+                    "quickType": "schedule",
+                    "content": encode_platform_text("return input;"),
+                    "objectVersionNumber": 2,
+                }
+            ]
+        elif path.endswith("marmot_scheduler/page"):
+            records = [
+                {
+                    "id": 3,
+                    "jobCode": "JOB_A",
+                    "tenantId": 30,
+                    "scriptCode": "SCRIPT_A",
+                    "jobId": 55,
+                    "jobStatus": "暂停",
+                    "objectVersionNumber": 4,
+                }
+            ]
+        else:
+            raise AssertionError(f"unexpected read path: {path}")
+        return {"content": records, "totalElements": 1}
+
+
 def settings():
     return Settings(
         base_url="https://gateway.dev.example.com",
@@ -376,6 +413,7 @@ def test_independent_resource_create_encodes_plain_text_and_defaults_empty_sourc
     )
     assert decode_platform_text(client.record["content"]) == "return input;"
     assert decode_platform_text(client.record["contentInput"]) == '{"body":{}}'
+    assert client.record["resourceLevel"] == "MEDIUM"
     create_event = next(
         event for event in client.events if event[0] == "POST" and not event[1].endswith("/page")
     )
@@ -393,6 +431,132 @@ def test_independent_resource_create_encodes_plain_text_and_defaults_empty_sourc
         },
     )
     assert decode_platform_text(empty_client.record["content"]) == ""
+
+
+def test_structured_description_is_bound_to_create_and_versioned_save():
+    client = PlatformClient()
+    service = PlatformResourceService(client, settings())
+    note = {"work_item": "cdp-185966", "customer_label": "示例项目", "summary": "物料查询"}
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        service.validate_create(
+            resource_type="independent_script",
+            tenant="SRM-DEMO",
+            record={"code": "EXAMPLE", "description": "old", "permission": "2", "module": "SADA"},
+            description_note=note,
+        )
+    assert client.events == []
+
+    created = service.create(
+        resource_type="independent_script",
+        tenant="SRM-DEMO",
+        record={"code": "EXAMPLE", "permission": "2", "module": "SADA"},
+        description_note=note,
+    )
+    assert created["verified"] is True
+    assert client.record["description"] == "cdp-185966【示例项目】物料查询"
+
+    update_note = {"work_item": "cdp-185967", "change_type": "fix", "summary": "修复映射"}
+    preview = service.preview_save(
+        resource_type="independent_script",
+        tenant="SRM-DEMO",
+        code="EXAMPLE",
+        changes={},
+        expected_version=1,
+        description_note=update_note,
+    )
+    assert preview["description"].endswith(" | cdp-185966【示例项目】物料查询")
+    saved = service.save(
+        resource_type="independent_script",
+        tenant="SRM-DEMO",
+        code="EXAMPLE",
+        changes={},
+        expected_version=1,
+        description_note=update_note,
+    )
+    assert saved["verified"] is True
+    assert client.record["description"] == preview["description"]
+    writes = len([event for event in client.events if event[0] == "PUT"])
+    unchanged = service.save(
+        resource_type="independent_script",
+        tenant="SRM-DEMO",
+        code="EXAMPLE",
+        changes={},
+        expected_version=2,
+        description_note=update_note,
+    )
+    assert unchanged["changed"] is False
+    assert len([event for event in client.events if event[0] == "PUT"]) == writes
+    with pytest.raises(VersionConflictError):
+        service.save(
+            resource_type="independent_script",
+            tenant="SRM-DEMO",
+            code="EXAMPLE",
+            changes={},
+            expected_version=1,
+            description_note=update_note,
+        )
+
+
+def test_query_block_requires_explicit_zero_one_must_read_and_reports_runtime_gap():
+    client = PlatformClient()
+    service = PlatformResourceService(client, settings())
+    record = {"queryBlockCode": "EXAMPLE_QUERY", "sqlContent": "select 1", "module": "SADA"}
+    with pytest.raises(ValueError, match="mustRead"):
+        service.validate_create(resource_type="query_block", tenant="SRM-DEMO", record=record)
+    assert client.events == []
+    created = service.create(
+        resource_type="query_block",
+        tenant="SRM-DEMO",
+        record={**record, "mustRead": "1"},
+    )
+    assert created["verified"] is True
+    with pytest.raises(ValueError, match="mustRead"):
+        service.save(
+            resource_type="query_block",
+            tenant="SRM-DEMO",
+            code="EXAMPLE_QUERY",
+            changes={"mustRead": True},
+            expected_version=1,
+        )
+    assert not any(event[0] == "PUT" for event in client.events)
+    result = service.save(
+        resource_type="query_block",
+        tenant="SRM-DEMO",
+        code="EXAMPLE_QUERY",
+        changes={"mustRead": "0"},
+        expected_version=1,
+    )
+    assert result["verified"] is True
+    assert result["runtime_verified"] is False
+
+
+def test_scheduled_script_inspection_reads_exact_pair_without_mutation_or_source():
+    client = ScheduledPairClient()
+    result = PlatformResourceService(client, settings()).inspect_scheduled_script(
+        tenant="SRM-DEMO", script_code="SCRIPT_A", job_code="JOB_A"
+    )
+    assert result["tenant_id"] == 30
+    assert result["linked_to_schedule_script"] is True
+    assert result["scheduler"]["state"] == "paused"
+    assert result["script"]["source_sha256"] is not None
+    assert result["runtime_execution_verified"] is False
+    assert "return input" not in repr(result)
+    assert {event[0] for event in client.events} == {"GET", "POST"}
+    assert all(event[1].endswith("/page") for event in client.events if event[0] == "POST")
+
+
+def test_scheduled_script_inspection_rejects_incomplete_page():
+    class IncompleteClient(ScheduledPairClient):
+        def post(self, path, *, params=None, json=None):
+            result = super().post(path, params=params, json=json)
+            if path.endswith("marmot_script_library/page"):
+                result["totalPages"] = 2
+            return result
+
+    with pytest.raises(VersionConflictError, match="complete"):
+        PlatformResourceService(IncompleteClient(), settings()).inspect_scheduled_script(
+            tenant="SRM-DEMO", script_code="SCRIPT_A", job_code="JOB_A"
+        )
 
 
 def test_generic_independent_save_encodes_plain_text_changes():

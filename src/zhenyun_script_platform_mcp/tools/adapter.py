@@ -11,8 +11,9 @@ def create_adapter(
     tenant_num: str,
     task_code: str,
     running_service: str,
-    description: str = "",
+    description: str | None = None,
     input_entity_code: str = "ANYTHING",
+    description_note: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return service.create(
         tenant_num=tenant_num,
@@ -20,6 +21,7 @@ def create_adapter(
         running_service=running_service,
         description=description,
         input_entity_code=input_entity_code,
+        description_note=description_note,
     )
 
 
@@ -31,6 +33,7 @@ def update_adapter(
     running_service: str,
     changes: dict[str, Any],
     expected_header_version: str | int,
+    description_note: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return service.update(
         tenant_num=tenant_num,
@@ -38,6 +41,7 @@ def update_adapter(
         running_service=running_service,
         changes=changes,
         expected_header_version=expected_header_version,
+        description_note=description_note,
     )
 
 

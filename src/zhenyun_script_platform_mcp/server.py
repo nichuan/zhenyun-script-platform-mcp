@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from .client import ScriptPlatformClient
 from .config import Settings
 from .confirmation import ConfirmationManager
+from .description_note import create_description
 from .exceptions import ScriptPlatformError
 from .resources import RequirementResourceType, ResourceType, resource_definition
 from .sanitizer import sanitize, sanitize_text, validate_source_integrity
@@ -165,13 +166,19 @@ def _creation_warnings(arguments: dict[str, Any]) -> list[str]:
     if not isinstance(record, dict):
         return []
     quick_type = str(record.get("quickType", "")).strip().lower()
+    if quick_type == "schedule":
+        return [
+            (
+                "This plan creates only the independent script. A scheduler requires separate "
+                "frequency, state, preview, confirmation, and verification."
+            )
+        ]
     related = {
         "api": "api_publish",
         "api_pre": "api_publish",
         "api_post": "api_publish",
         "api_publish": "api_publish",
         "consumer": "queue_consumer",
-        "schedule": "scheduler",
     }.get(quick_type)
     if not related:
         return []
@@ -182,6 +189,14 @@ def _creation_warnings(arguments: dict[str, Any]) -> list[str]:
             "before deleting the script."
         )
     ]
+
+
+def _adapter_create_description_preview(
+    description: str | None, description_note: dict[str, Any]
+) -> dict[str, str]:
+    if description is not None:
+        raise ValueError("description_note and description are mutually exclusive")
+    return {"description": create_description(description_note)}
 
 
 def _write_preview(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -212,12 +227,15 @@ def _invoke_write(
     def guarded() -> Any:
         runtime = get_runtime()
         if not confirmation_token:
+            preview = _write_preview(arguments)
             if preflight is not None:
-                preflight()
+                prepared = preflight()
+                if isinstance(prepared, dict):
+                    preview["prepared"] = _value_preview("prepared", prepared)
             return runtime.confirmation.prepare(
                 tool=tool,
                 arguments=arguments,
-                preview=_write_preview(arguments),
+                preview=preview,
             )
         runtime.confirmation.consume(
             tool=tool,
@@ -405,9 +423,15 @@ def platform_resource_create(
     tenant: str,
     record: dict[str, Any],
     confirmation_token: str | None = None,
+    description_note: dict[str, Any] | None = None,
 ) -> str:
-    """生成 resource_type 创建计划；仅后续人工确认并携带一次性 confirmation_token 才执行，返回 ok 或 error.retryable。"""
-    arguments = {"resource_type": resource_type, "tenant": tenant, "record": record}
+    """创建计划可用 description_note 生成需求标题；确认令牌绑定完整意图。"""
+    arguments = {
+        "resource_type": resource_type,
+        "tenant": tenant,
+        "record": record,
+        "description_note": description_note,
+    }
     return _invoke_write(
         tool="platform_resource_create",
         arguments=arguments,
@@ -416,12 +440,14 @@ def platform_resource_create(
             resource_type=resource_type,
             tenant=tenant,
             record=record,
+            description_note=description_note,
         ),
         action=lambda: platform_tools.create_resource(
             get_runtime().platform,
             resource_type=resource_type,
             tenant=tenant,
             record=record,
+            description_note=description_note,
         ),
         preserve_fields=frozenset(resource_definition(resource_type).source_fields),
     )
@@ -435,19 +461,33 @@ def platform_resource_save(
     changes: dict[str, Any],
     expected_version: str | int,
     confirmation_token: str | None = None,
+    description_note: dict[str, Any] | None = None,
 ) -> str:
-    """生成带 expected_version 的版本保护更新计划；仅后续人工确认并携带一次性 confirmation_token 才执行。"""
+    """版本保护更新；description_note 安全增补旧描述，须后续确认。"""
     arguments = {
         "resource_type": resource_type,
         "tenant": tenant,
         "code": code,
         "changes": changes,
         "expected_version": expected_version,
+        "description_note": description_note,
     }
     return _invoke_write(
         tool="platform_resource_save",
         arguments=arguments,
         confirmation_token=confirmation_token,
+        preflight=(
+            lambda: get_runtime().platform.preview_save(
+                resource_type=resource_type,
+                tenant=tenant,
+                code=code,
+                changes=changes,
+                expected_version=expected_version,
+                description_note=description_note,
+            )
+        )
+        if description_note is not None
+        else None,
         action=lambda: platform_tools.save_resource(
             get_runtime().platform,
             resource_type=resource_type,
@@ -455,6 +495,7 @@ def platform_resource_save(
             code=code,
             changes=changes,
             expected_version=expected_version,
+            description_note=description_note,
         ),
     )
 
@@ -521,6 +562,19 @@ def platform_table_action(
 
 
 @mcp.tool(annotations=READ_ONLY)
+def platform_scheduled_script_inspect(tenant: str, script_code: str, job_code: str) -> str:
+    """只读核查同租户独立脚本与调度的精确关联、版本和有限状态；不执行或释放写入。"""
+    return _invoke(
+        lambda: platform_tools.inspect_scheduled_script(
+            get_runtime().platform,
+            tenant=tenant,
+            script_code=script_code,
+            job_code=job_code,
+        )
+    )
+
+
+@mcp.tool(annotations=READ_ONLY)
 def independent_script_get(tenant_num: str, code: str) -> str:
     """权威读取 Independent Script 当前源码、版本、哈希和 Fixture；只读，返回 ok 或 error.retryable。"""
     return _invoke(
@@ -536,29 +590,31 @@ def independent_script_create(
     tenant_num: str,
     code: str,
     quick_type: str,
-    description: str,
     permission: str,
     module: str,
+    description: str = "",
     source: str = "",
     raw_input: Any | None = None,
     confirmation_token: str | None = None,
+    description_note: dict[str, Any] | None = None,
 ) -> str:
-    """生成 Independent Script 创建计划；仅后续人工确认并携带一次性 confirmation_token 才执行，平台负责编码。"""
+    """创建独立脚本；可用 description_note 生成需求标题，默认 resourceLevel=MEDIUM。"""
     record: dict[str, Any] = {
         "code": code,
         "quickType": quick_type,
-        "description": description,
         "permission": permission,
         "module": module,
         "content": source,
     }
+    if description or description_note is None:
+        record["description"] = description
     if raw_input is not None:
         record["contentInput"] = (
             raw_input
             if isinstance(raw_input, str)
             else json.dumps(raw_input, ensure_ascii=False, separators=(",", ":"))
         )
-    arguments = {"tenant_num": tenant_num, "record": record}
+    arguments = {"tenant_num": tenant_num, "record": record, "description_note": description_note}
     return _invoke_write(
         tool="independent_script_create",
         arguments=arguments,
@@ -567,12 +623,14 @@ def independent_script_create(
             resource_type="independent_script",
             tenant=tenant_num,
             record=record,
+            description_note=description_note,
         ),
         action=lambda: platform_tools.create_resource(
             get_runtime().platform,
             resource_type="independent_script",
             tenant=tenant_num,
             record=record,
+            description_note=description_note,
         ),
         preserve_fields=frozenset({"content"}),
     )
@@ -640,22 +698,27 @@ def adapter_create(
     tenant_num: str,
     task_code: str,
     running_service: str,
-    description: str = "",
+    description: str | None = None,
     input_entity_code: str = "ANYTHING",
     confirmation_token: str | None = None,
+    description_note: dict[str, Any] | None = None,
 ) -> str:
-    """生成禁用 Adapter 创建计划；task_code 必须已在事件注册表存在，需后续人工确认和一次性 confirmation_token 执行。"""
+    """生成 Adapter 创建计划；可用 description_note 生成需求标题，需后续确认。"""
     arguments = {
         "tenant_num": tenant_num,
         "task_code": task_code,
         "running_service": running_service,
         "description": description,
         "input_entity_code": input_entity_code,
+        "description_note": description_note,
     }
     return _invoke_write(
         tool="adapter_create",
         arguments=arguments,
         confirmation_token=confirmation_token,
+        preflight=(lambda: _adapter_create_description_preview(description, description_note))
+        if description_note is not None
+        else None,
         action=lambda: adapter_tools.create_adapter(
             get_runtime().adapter,
             tenant_num=tenant_num,
@@ -663,6 +726,7 @@ def adapter_create(
             running_service=running_service,
             description=description,
             input_entity_code=input_entity_code,
+            description_note=description_note,
         ),
     )
 
@@ -675,19 +739,33 @@ def adapter_update(
     changes: dict[str, Any],
     expected_header_version: str | int,
     confirmation_token: str | None = None,
+    description_note: dict[str, Any] | None = None,
 ) -> str:
-    """生成带 expected_header_version 的 Adapter Header 更新计划；仅后续人工确认并携带一次性 confirmation_token 才执行。"""
+    """版本保护更新 Adapter Header；description_note 可安全增补旧描述。"""
     arguments = {
         "tenant_num": tenant_num,
         "task_code": task_code,
         "running_service": running_service,
         "changes": changes,
         "expected_header_version": expected_header_version,
+        "description_note": description_note,
     }
     return _invoke_write(
         tool="adapter_update",
         arguments=arguments,
         confirmation_token=confirmation_token,
+        preflight=(
+            lambda: get_runtime().adapter.preview_update(
+                tenant_num=tenant_num,
+                task_code=task_code,
+                running_service=running_service,
+                changes=changes,
+                expected_header_version=expected_header_version,
+                description_note=description_note,
+            )
+        )
+        if description_note is not None
+        else None,
         action=lambda: adapter_tools.update_adapter(
             get_runtime().adapter,
             tenant_num=tenant_num,
@@ -695,6 +773,7 @@ def adapter_update(
             running_service=running_service,
             changes=changes,
             expected_header_version=expected_header_version,
+            description_note=description_note,
         ),
     )
 

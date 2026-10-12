@@ -6,7 +6,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from ..codec import decode_platform_text, encode_platform_text, source_hash
+from ..codec import (
+    assert_plain_script_content,
+    decode_script_content,
+    encode_platform_text,
+    source_hash,
+)
 from ..config import Settings
 from ..exceptions import NotFoundError, SaveVerificationError, VersionConflictError
 from ..models import IndependentScript
@@ -62,7 +67,7 @@ class IndependentScriptService:
                 f"Independent script lookup returned {len(matches)} exact records; refusing to choose"
             )
         record = matches[0]
-        source = decode_platform_text(record.get("content"))
+        source = decode_script_content(record.get("content"))
         fixture = parse_encoded_fixture(record.get("contentInput"))
         public = IndependentScript(
             id=record.get("id"),
@@ -91,6 +96,7 @@ class IndependentScriptService:
         expected_version: str | int | None = None,
     ) -> dict[str, Any]:
         validate_source_integrity(source)
+        assert_plain_script_content(source)
         before = self._get_snapshot(tenant_num=tenant_num, code=code)
         actual_version = before.public.object_version_number
         if expected_version is not None and not versions_equal(expected_version, actual_version):
