@@ -12,6 +12,7 @@ from typing import Any
 MAX_DESCRIPTION_LENGTH = 255
 MAX_SUMMARY_LENGTH = 60
 _WORK_ITEM = re.compile(r"^(cdp|srm)-\d+$", re.IGNORECASE)
+_REQUIREMENT_CODE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-[0-9]+")
 _MANAGED = re.compile(r"^((?:cdp|srm)-\d+) \[(需求|修复|变更)\] (.+)$", re.IGNORECASE)
 _LABELS = {"requirement": "需求", "fix": "修复", "change": "变更"}
 _SEPARATOR = " | "
@@ -75,6 +76,21 @@ def _assert_length(description: str) -> str:
             f"description exceeds the MCP limit of {MAX_DESCRIPTION_LENGTH} characters"
         )
     return description
+
+
+def normalize_requirement_code(code: str) -> str:
+    code = code.strip()
+    if not _REQUIREMENT_CODE.fullmatch(code):
+        raise ValueError("requirement_code must be a work item code such as CRO-5974")
+    return code
+
+
+def append_requirement_code(current: str | None, code: str) -> str:
+    current = current or ""
+    if code.casefold() in {part.strip().casefold() for part in re.split(r"[;；]", current)}:
+        return current
+    separator = "" if not current or current.rstrip().endswith((";", "；")) else ";"
+    return _assert_length(f"{current}{separator}{code}")
 
 
 def create_description(note: dict[str, Any]) -> str:

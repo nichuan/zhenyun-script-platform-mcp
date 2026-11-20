@@ -32,6 +32,8 @@ def test_server_exposes_lifecycle_and_verified_platform_tools():
         "adapter_update",
         "adapter_toggle",
         "adapter_delete",
+        "script_batch_deploy",
+        "script_batch_status",
         "platform_context_get",
         "platform_capabilities_list",
         "platform_resource_search",
@@ -55,6 +57,8 @@ def test_tool_annotations_distinguish_reads_remote_execution_and_writes():
     assert tools["adapter_debug"].annotations.readOnlyHint is False
     assert tools["adapter_debug"].annotations.destructiveHint is False
     assert tools["adapter_deploy"].annotations.destructiveHint is True
+    assert tools["script_batch_deploy"].annotations.destructiveHint is True
+    assert tools["script_batch_status"].annotations.readOnlyHint is True
     assert tools["independent_script_create"].annotations.destructiveHint is True
     assert tools["independent_script_save"].annotations.destructiveHint is True
     assert tools["platform_resource_get"].annotations.readOnlyHint is True
@@ -73,6 +77,7 @@ def test_every_write_tool_requires_the_two_phase_confirmation_parameter():
         "independent_script_create",
         "independent_script_save",
         "adapter_deploy",
+        "script_batch_deploy",
         "adapter_create",
         "adapter_update",
         "adapter_toggle",

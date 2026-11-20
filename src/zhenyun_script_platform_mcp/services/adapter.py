@@ -41,6 +41,18 @@ class AdapterSnapshot:
     line_key: str
 
 
+def adapter_revision(adapter: Adapter) -> dict[str, Any]:
+    return {
+        "id": adapter.id,
+        "header_version": adapter.object_version_number,
+        "enabled": adapter.enabled,
+        "description": adapter.description,
+        "lines": {
+            str(line.id): [line.object_version_number, line.source_hash] for line in adapter.lines
+        },
+    }
+
+
 class AdapterService:
     ENDPOINT = "/sada/v1/adaptor-task-headers"
     TOGGLE_ENDPOINT = f"{ENDPOINT}/toggle-cache"
@@ -252,6 +264,148 @@ class AdapterService:
             raw_line["headerId"] = raw_line.get("headerId", payload.get("id"))
         return payload
 
+    def assert_unique_toggle_target(self, adapter: Adapter) -> None:
+        # The platform toggle addresses a tenant and task code, without runningService.
+        payload = self._client.get(
+            self.ENDPOINT,
+            params={
+                "page": 0,
+                "size": 10,
+                "asyncCountFlag": "DEFAULT",
+                "taskCode": adapter.task_code,
+                "applyTenantNum": adapter.tenant_num,
+            },
+        )
+        items = extract_items(payload)
+        matches = [
+            item.get("id")
+            for item in items
+            if item.get("taskCode") == adapter.task_code
+            and item.get("applyTenantNum") == adapter.tenant_num
+        ]
+        total = (
+            payload.get("totalElements", len(items)) if isinstance(payload, dict) else len(items)
+        )
+        if matches != [adapter.id] or len(items) >= 10 or int(total) > len(items):
+            raise AdapterStateError("Cannot verify a unique tenant/task target for Adapter toggle")
+
+    def _deployment_payload(
+        self, snapshot: AdapterSnapshot, line_id: str | int | None, source: str | None
+    ) -> dict[str, Any]:
+        payload = self._prepare_header_payload(snapshot.raw_header)
+        if source is not None:
+            for raw_line in payload[snapshot.line_key]:
+                if str(raw_line.get("id")) == str(line_id):
+                    raw_line["scriptContent"] = encode_platform_text(source)
+                    break
+            else:
+                raise AdapterStateError("Target line disappeared before save")
+        return payload
+
+    def apply_guarded_change(
+        self,
+        *,
+        tenant_num: str,
+        task_code: str,
+        running_service: str,
+        revision: dict[str, Any],
+        line_id: str | int | None,
+        source: str | None,
+        changes: dict[str, Any],
+    ) -> dict[str, Any]:
+        original = self._get_snapshot(
+            tenant_num=tenant_num, task_code=task_code, running_service=running_service
+        )
+        if adapter_revision(original.public) != revision:
+            raise VersionConflictError("Adapter changed since the change was prepared")
+        if original.public.enabled:
+            self.assert_unique_toggle_target(original.public)
+
+        current = original
+        stage = "disable" if original.public.enabled else "prepare_save"
+        verified = False
+        saved = False
+        try:
+            if original.public.enabled:
+                self._toggle(tenant_num=tenant_num, task_code=task_code, enabled=False)
+                current = self._reload(original.public)
+                after_disable = adapter_revision(current.public)
+                expected = {**revision, "enabled": False}
+                # The platform increments the header version when it toggles the cache.
+                expected["header_version"] = after_disable["header_version"]
+                if after_disable != expected or after_disable["header_version"] is None:
+                    raise AdapterStateError("Adapter state changed unexpectedly while disabling")
+
+            stage = "prepare_save"
+            payload = self._deployment_payload(current, line_id, source)
+            payload.update(changes)
+            stage = "save"
+            self._client.post(self.SAVE_ENDPOINT, json=payload)
+            saved = True
+
+            stage = "verify_save"
+            current = self._reload(original.public)
+            actual = current.public
+            expected_description = changes.get("description", revision["description"])
+            expected_hashes = {key: value[1] for key, value in revision["lines"].items()}
+            if source is not None:
+                expected_hashes[str(line_id)] = source_hash(source)
+            if (
+                actual.id != original.public.id
+                or actual.enabled
+                or actual.description != expected_description
+                or {str(line.id): line.source_hash for line in actual.lines} != expected_hashes
+                or any(current.raw_header.get(key) != value for key, value in changes.items())
+            ):
+                raise SaveVerificationError(
+                    "Adapter description, source or disabled state differs after save"
+                )
+            verified = True
+
+            if original.public.enabled:
+                stage = "restore_enabled"
+                self.assert_unique_toggle_target(current.public)
+                self._toggle(tenant_num=tenant_num, task_code=task_code, enabled=True)
+                before_restore = adapter_revision(current.public)
+                current = self._reload(original.public)
+                final = adapter_revision(current.public)
+                if final != {
+                    **before_restore,
+                    "enabled": True,
+                    "header_version": final["header_version"],
+                }:
+                    raise AdapterStateError(
+                        "Adapter state changed unexpectedly while restoring enablement"
+                    )
+        except Exception as exc:  # noqa: BLE001 - preserve state for any failure after a mutation
+            try:
+                observed = self._reload(original.public).public
+            except Exception:  # noqa: BLE001 - failed readback leaves the final state unknown
+                observed = None
+            return {
+                "stage": stage,
+                "saved": None if stage == "save" else saved,
+                "verified": verified,
+                "original_enabled": original.public.enabled,
+                "last_observed_enabled": observed.enabled if observed is not None else None,
+                "last_observed_header_version": observed.object_version_number
+                if observed is not None
+                else None,
+                "requires_manual_attention": True,
+                "error": self._failure(exc),
+            }
+
+        final_line = self._select_line(current.public, line_id) if source is not None else None
+        return {
+            "saved": True,
+            "verified": True,
+            "original_enabled": original.public.enabled,
+            "final_enabled": current.public.enabled,
+            "new_header_version": current.public.object_version_number,
+            "new_line_version": final_line.object_version_number if final_line else None,
+            "new_hash": final_line.source_hash if final_line else None,
+        }
+
     def create(
         self,
         *,
@@ -376,6 +530,22 @@ class AdapterService:
                     "header_version": before.public.object_version_number,
                     "enabled": before.public.enabled,
                 }
+        if "description" in effective_changes:
+            result = self.apply_guarded_change(
+                tenant_num=tenant_num,
+                task_code=task_code,
+                running_service=running_service,
+                revision=adapter_revision(before.public),
+                line_id=None,
+                source=None,
+                changes=effective_changes,
+            )
+            return {
+                **result,
+                "old_header_version": before.public.object_version_number,
+                "changed_fields": sorted(effective_changes),
+                "enabled": result.get("final_enabled", result.get("last_observed_enabled")),
+            }
         payload = self._prepare_header_payload(before.raw_header)
         payload.update(effective_changes)
         self._client.post(self.SAVE_ENDPOINT, json=payload)
@@ -560,19 +730,7 @@ class AdapterService:
                     raise AdapterStateError("Adapter remained enabled after the disable operation")
 
             target_line = self._select_line(current.public, original_line.id)
-            payload = self._prepare_header_payload(current.raw_header)
-            raw_lines = payload.get(current.line_key)
-            if not isinstance(raw_lines, list):
-                raise AdapterStateError("Fresh adapter payload did not contain its line collection")
-            replaced = False
-            for raw_line in raw_lines:
-                if not isinstance(raw_line, dict):
-                    continue
-                if str(raw_line.get("id")) == str(target_line.id):
-                    raw_line["scriptContent"] = encode_platform_text(source)
-                    replaced = True
-            if not replaced:
-                raise AdapterStateError("Target line disappeared before save")
+            payload = self._deployment_payload(current, target_line.id, source)
         except (ScriptPlatformError, RuntimeError, TypeError, ValueError) as exc:
             if not disabled_by_us:
                 raise

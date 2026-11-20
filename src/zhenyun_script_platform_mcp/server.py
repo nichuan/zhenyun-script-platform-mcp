@@ -27,6 +27,7 @@ from .services import (
     IndependentScriptService,
     PlatformResourceService,
 )
+from .services.batch import BatchAdapter, BatchIndependent, ScriptBatchService
 from .tools import adapter as adapter_tools
 from .tools import fixture as fixture_tools
 from .tools import independent as independent_tools
@@ -40,10 +41,14 @@ mcp = FastMCP(
         "fixtures, adapter state, verified Marmot resources, definitions, relationships, and "
         "registered table actions. Pangu script tools may discover an identity but must not "
         "replace authoritative get calls from this server. Develop scripts against the remote "
-        "DEV GraalJS runtime. Debug calls never save. Only call any save/create/update/delete/"
+        "DEV GraalJS runtime. Debug calls never save. Every save/create/update/delete/"
         "toggle/deploy/action tool uses mandatory two-phase confirmation. The first call only "
         "returns a signed plan. Show it to the user and stop; only a later explicit confirmation "
-        "allows a second identical call with confirmation_token. Never confirm on the user's behalf."
+        "allows execution with confirmation_token. Never confirm on the user's behalf. "
+        "Use script_batch_deploy for multiple existing scripts, or to append a requirement code "
+        "to an adapter description. Confirm the whole saved plan once with only confirmation_token, "
+        "then follow it with the read-only script_batch_status tool. Other write tools require "
+        "the same business arguments in the confirmation call."
     ),
 )
 
@@ -57,6 +62,7 @@ class Runtime:
     adapter: AdapterService
     platform: PlatformResourceService
     confirmation: ConfirmationManager
+    batch: ScriptBatchService
 
 
 _runtime: Runtime | None = None
@@ -68,14 +74,24 @@ def get_runtime() -> Runtime:
         settings = Settings.from_env()
         client = ScriptPlatformClient(settings)
         debug = DebugService(client, settings)
+        adapter = AdapterService(client, settings, debug)
+        independent = IndependentScriptService(client, settings)
+        confirmation = ConfirmationManager(settings.confirmation_ttl_seconds)
         _runtime = Runtime(
             settings=settings,
             client=client,
-            independent=IndependentScriptService(client, settings),
+            independent=independent,
             debug=debug,
-            adapter=AdapterService(client, settings, debug),
+            adapter=adapter,
             platform=PlatformResourceService(client, settings),
-            confirmation=ConfirmationManager(settings.confirmation_ttl_seconds),
+            confirmation=confirmation,
+            batch=ScriptBatchService(
+                adapter,
+                independent,
+                confirmation,
+                base_url=settings.base_url,
+                ttl_seconds=settings.confirmation_ttl_seconds,
+            ),
         )
     return _runtime
 
@@ -918,6 +934,47 @@ def adapter_deploy(
             enable=enable,
         ),
     )
+
+
+@mcp.tool(annotations=PLATFORM_WRITE)
+def script_batch_deploy(
+    tenant_num: str | None = None,
+    adapters: list[BatchAdapter] | None = None,
+    independent_scripts: list[BatchIndependent] | None = None,
+    requirement_code: str | None = None,
+    confirmation_token: str | None = None,
+) -> str:
+    """为同一租户最多 30 个现有脚本生成只读批次计划。用户一次确认后，仅传 confirmation_token 启动。
+
+    requirement_code 可用分号追加到本批适配器描述末尾。适配器停用后写入并验证，再恢复原启用状态。
+    独立脚本先直接保存。调用 script_batch_status 查询终态，失败时停止余项。
+    """
+
+    def action() -> dict[str, Any]:
+        batch = get_runtime().batch
+        if confirmation_token is not None:
+            if any(
+                value is not None
+                for value in (tenant_num, adapters, independent_scripts, requirement_code)
+            ):
+                raise ValueError("Confirmation accepts only confirmation_token")
+            return batch.start(confirmation_token)
+        if tenant_num is None:
+            raise ValueError("tenant_num is required to prepare a batch")
+        return batch.prepare(
+            tenant_num=tenant_num,
+            adapters=adapters or [],
+            independent_scripts=independent_scripts or [],
+            requirement_code=requirement_code,
+        )
+
+    return _invoke(action)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def script_batch_status(batch_id: str) -> str:
+    """只读查询当前 MCP 会话的批次进度、逐项结果及终态 completed 或 failed。"""
+    return _invoke(lambda: get_runtime().batch.status(batch_id))
 
 
 def main() -> None:

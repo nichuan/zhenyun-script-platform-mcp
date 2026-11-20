@@ -94,12 +94,21 @@ class IndependentScriptService:
         code: str,
         source: str,
         expected_version: str | int | None = None,
+        expected_id: str | int | None = None,
+        expected_source_hash: str | None = None,
     ) -> dict[str, Any]:
         validate_source_integrity(source)
         assert_plain_script_content(source)
         before = self._get_snapshot(tenant_num=tenant_num, code=code)
         actual_version = before.public.object_version_number
-        if expected_version is not None and not versions_equal(expected_version, actual_version):
+        if (
+            (expected_version is not None and not versions_equal(expected_version, actual_version))
+            or (expected_id is not None and before.public.id != expected_id)
+            or (
+                expected_source_hash is not None
+                and before.public.source_hash != expected_source_hash
+            )
+        ):
             raise VersionConflictError(
                 "Independent script was modified after loading. Reload before saving.",
                 details={"expected_version": expected_version, "actual_version": actual_version},

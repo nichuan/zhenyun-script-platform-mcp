@@ -23,7 +23,7 @@ JSON。
 
 ## MCP 工具
 
-脚本生命周期保留 8 个高层工具：
+脚本生命周期工具：
 
 | 工具 | 行为 | 是否改变平台状态 |
 | --- | --- | --- |
@@ -35,6 +35,8 @@ JSON。
 | `adapter_debug` | 带当前 `scriptVersion` 调试指定 Line | 否 |
 | `adapter_extract_input` | 从调用方提供的日志文本中平衡提取 JSON | 否 |
 | `adapter_deploy` | 停用（若需要）、重新读取、保存、校验、恢复或按 `enable` 启用状态 | **是** |
+| `script_batch_deploy` | 同一租户的 Adapter 和 Independent Script 共用一份计划和一次确认 | **是** |
+| `script_batch_status` | 按 `batch_id` 读取批次进度和逐项结果 | 否 |
 
 从 WebOps 参考实现吸收的增量能力按现有风格收敛为 17 个工具：
 
@@ -126,9 +128,9 @@ uv run --project /ABSOLUTE/PATH/zhenyun-script-platform-mcp \
 | `SCRIPT_PLATFORM_CREATE_VERIFY_ATTEMPTS` / `CREATE_VERIFY_DELAY_SECONDS` | 否 | `4` / `0.5` | 创建后回读验证的最大尝试次数与间隔秒数 |
 
 不再使用写开关、Host 白名单或租户白名单。每个平台写工具固定为两阶段协议：第一次只返回目标、
-版本、变更摘要、请求摘要和短效签名，不发平台写请求；Agent 必须停止并请用户确认。第二次
-参数必须完全一致且携带签名，确认令牌默认十分钟有效、只能使用一次，签名过期、复用或参数漂移
-都会被拒绝。
+版本、变更摘要、请求摘要和短效签名，不发平台写请求；Agent 必须停止并请用户确认。第二次调用
+携带签名。单项工具须重传相同业务参数，`script_batch_deploy` 只传 `confirmation_token`。
+确认令牌默认十分钟有效、只能使用一次，签名过期、复用或参数漂移都会被拒绝。
 确认令牌的签名密钥和已使用记录保存在当前 MCP 进程内；MCP 重启后，未执行的计划需要重新生成。
 
 MCP 宿主的当前工作目录不作为配置根目录。若从 IDE、插件缓存或任意目录启动，建议在宿主配置中
@@ -229,6 +231,27 @@ CodeBlock 的 `content`、QueryBlock 的 `sqlContent/countSql` 也采用相同�
 
 所有源码保存、部署和远程调试入口会在发起平台请求前拒绝 `<REDACTED>`、`<MASKED>`、
 `<<REDACTED:length>>`、`__MASKED_*__` 等脱敏占位符，防止残缺源码进入调试或持久化链路。
+
+## 批量部署现有脚本
+
+`script_batch_deploy` 为同一租户的现有 Adapter 和 Independent Script 生成一份计划。可以同时提交
+两类产物，也可以只提交其中一类。以 `tenant_num` 指定租户，通过 `adapters` 和 `independent_scripts`
+列出范围，每批最多 30 项，源码合计最多 4 MiB。Adapter 条目包含 `task_code`、`running_service` 和需要更新的 `source`。
+每个 Adapter 最多更新一个 Line，多 Line 时须明确指定 `line_id`。仅追加描述时可省略 `source`。
+Independent Script 条目填写 `code` 和 `source`。可选的 `requirement_code` 只对 Adapter 生效，
+保留旧描述和需求号原样，用 `;` 追加，按分号分段忽略大小写去重。
+
+1. 第一次调用不传 `confirmation_token`。工具读取平台状态，把目标、对象版本和实际变更绑定到一份签名计划。
+2. 用户审阅全部目标、旧版本、变更摘要、`request_sha256` 和有效期，确认一次。第二次调用只传
+   `confirmation_token`，启动批次并返回 `batch_id`。在同一 MCP 进程调用 `script_batch_status` 跟进终态。
+3. Independent Script 先直接保存并回读，再按清单顺序处理 Adapter。Adapter 禁用后才改描述或源码，
+   回读验证成功后恢复原启用状态。无变更项跳过。
+4. 遇到首个失败后停止并将剩余项目标为 `not_run`。批次中的远端写入分别生效。禁用后若状态无法验证，
+   报告最后读到的状态和需人工处理项。若遇冲突、失败、结果不明确或进程重启，先回读实际状态，
+   仅将仍需写入的产物纳入新计划。执行记录保存在当前 MCP 进程内。
+
+个人 Codex 插件由工作区副本打包。更新本工具或 Skill 后，在同级 `zhenyun-pangu-mcp` 目录运行
+`./scripts/update_codex_plugin.sh` 同步工作区，然后从新聊天加载新版。
 
 ## Adapter 部署生命周期
 

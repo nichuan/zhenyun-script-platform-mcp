@@ -113,6 +113,11 @@ def test_adapter_metadata_update_preserves_lines(adapter_client, write_settings)
     assert result["verified"] is True
     assert adapter_client.header["description"] == "changed"
     assert adapter_client.header["adaptorTaskLines"][0]["_status"] == "update"
+    assert [event for event in adapter_client.events if event != "GET"] == [
+        "TOGGLE false",
+        "SAVE",
+        "TOGGLE true",
+    ]
 
 
 def test_adapter_description_note_previews_and_updates_with_version_guard(
